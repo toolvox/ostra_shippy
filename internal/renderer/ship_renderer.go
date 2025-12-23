@@ -15,6 +15,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"github.com/user/ostra_shippy/internal/config"
 	"github.com/user/ostra_shippy/internal/models"
+	"github.com/user/ostra_shippy/internal/utils"
 )
 
 const (
@@ -148,38 +149,6 @@ func getTileImagePath(tile map[string]interface{}, coMap map[string]map[string]i
 	}
 
 	return imagePath
-}
-
-// extractSpriteFromSheet extracts a single sprite from a 4x4 sprite sheet
-// index is 0-15, representing position in the sheet (0-indexed):
-//
-//	0  1  2  3
-//	4  5  6  7
-//	8  9 10 11
-//
-// 12 13 14 15
-func extractSpriteFromSheet(sheet *ebiten.Image, index int) *ebiten.Image {
-	if sheet == nil {
-		return nil
-	}
-
-	sheetWidth := sheet.Bounds().Dx()
-	sheetHeight := sheet.Bounds().Dy()
-
-	// Calculate tile size (4x4 grid)
-	tileWidth := sheetWidth / 4
-	tileHeight := sheetHeight / 4
-
-	// Calculate position in grid (0-indexed)
-	row := index / 4
-	col := index % 4
-
-	// Extract the sub-image
-	x := col * tileWidth
-	y := row * tileHeight
-	rect := image.Rect(x, y, x+tileWidth, y+tileHeight)
-
-	return sheet.SubImage(rect).(*ebiten.Image)
 }
 
 // calculateWallSpriteIndex determines which sprite from the 4x4 sheet to use
@@ -539,7 +508,7 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 		var spriteToRender *ebiten.Image
 		if isWall {
 			// TODO: Fix neighbor detection - for now just use index 13
-			spriteToRender = extractSpriteFromSheet(tileImg, 13)
+			spriteToRender = utils.ExtractSpriteFromSheet(tileImg, 13)
 		} else {
 			// Floors use the full image
 			spriteToRender = tileImg
@@ -598,7 +567,7 @@ func (r *ShipRenderer) renderCursorPreview(cursorTile map[string]interface{}, it
 		var spriteToRender *ebiten.Image
 		if isCursorWall {
 			// Use index 13 for cursor preview (standard wall segment)
-			spriteToRender = extractSpriteFromSheet(cursorImg, 13)
+			spriteToRender = utils.ExtractSpriteFromSheet(cursorImg, 13)
 		} else {
 			spriteToRender = cursorImg
 		}
