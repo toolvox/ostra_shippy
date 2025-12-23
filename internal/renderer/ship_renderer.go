@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	_ "image/png"
@@ -29,6 +30,7 @@ type ShipRenderer struct {
 	lastMouseX  int
 	lastMouseY  int
 	showFloor   bool
+	showWall    bool
 	tileImages  map[string]*ebiten.Image
 	viewportX   float32
 	viewportY   float32
@@ -51,6 +53,7 @@ func NewShipRenderer() *ShipRenderer {
 		offsetY:    250,
 		scale:      1.0,
 		showFloor:  true,
+		showWall:   true,
 		tileImages: make(map[string]*ebiten.Image),
 	}
 }
@@ -147,6 +150,132 @@ func getTileImagePath(tile map[string]interface{}, coMap map[string]map[string]i
 	return imagePath
 }
 
+// extractSpriteFromSheet extracts a single sprite from a 4x4 sprite sheet
+// index is 0-15, representing position in the sheet (0-indexed):
+//
+//	0  1  2  3
+//	4  5  6  7
+//	8  9 10 11
+//
+// 12 13 14 15
+func extractSpriteFromSheet(sheet *ebiten.Image, index int) *ebiten.Image {
+	if sheet == nil {
+		return nil
+	}
+
+	sheetWidth := sheet.Bounds().Dx()
+	sheetHeight := sheet.Bounds().Dy()
+
+	// Calculate tile size (4x4 grid)
+	tileWidth := sheetWidth / 4
+	tileHeight := sheetHeight / 4
+
+	// Calculate position in grid (0-indexed)
+	row := index / 4
+	col := index % 4
+
+	// Extract the sub-image
+	x := col * tileWidth
+	y := row * tileHeight
+	rect := image.Rect(x, y, x+tileWidth, y+tileHeight)
+
+	return sheet.SubImage(rect).(*ebiten.Image)
+}
+
+// calculateWallSpriteIndex determines which sprite from the 4x4 sheet to use
+// based on neighboring walls. Returns index 0-15, or 13 as default.
+func calculateWallSpriteIndex(items []interface{}, tileX, tileY float64) int {
+	// Build a map of wall positions for quick lookup
+	wallPositions := make(map[string]bool)
+	for _, itemInterface := range items {
+		if item, ok := itemInterface.(map[string]interface{}); ok {
+			itemName := ""
+			if name, ok := item["strName"].(string); ok {
+				itemName = name
+			}
+
+			// Only consider walls (exclude Loose items which are not wall tiles)
+			if len(itemName) >= 7 && itemName[:7] == "ItmWall" && !strings.HasSuffix(itemName, "Loose") {
+				x := 0.0
+				y := 0.0
+				if fX, ok := item["fX"].(float64); ok {
+					x = fX
+				}
+				if fY, ok := item["fY"].(float64); ok {
+					y = fY
+				}
+				key := fmt.Sprintf("%.0f,%.0f", x, y)
+				wallPositions[key] = true
+			}
+		}
+	}
+
+	// Check for neighbors (up, down, left, right)
+	hasUp := wallPositions[fmt.Sprintf("%.0f,%.0f", tileX, tileY+1)]
+	hasDown := wallPositions[fmt.Sprintf("%.0f,%.0f", tileX, tileY-1)]
+	hasLeft := wallPositions[fmt.Sprintf("%.0f,%.0f", tileX-1, tileY)]
+	hasRight := wallPositions[fmt.Sprintf("%.0f,%.0f", tileX+1, tileY)]
+
+	if config.Verbose {
+		log.Printf("Wall at (%.0f,%.0f): U=%v D=%v L=%v R=%v, positions found: %d",
+			tileX, tileY, hasUp, hasDown, hasLeft, hasRight, len(wallPositions))
+	}
+
+	// Calculate bitmask (up=8, right=4, down=2, left=1)
+	bitmask := 0
+	if hasUp {
+		bitmask |= 8
+	}
+	if hasRight {
+		bitmask |= 4
+	}
+	if hasDown {
+		bitmask |= 2
+	}
+	if hasLeft {
+		bitmask |= 1
+	}
+
+	// Map bitmask to sprite index
+	// This mapping may need adjustment based on actual sprite sheet layout
+	switch bitmask {
+	case 0: // No neighbors
+		return 13
+	case 1: // Left only
+		return 12
+	case 2: // Down only
+		return 1
+	case 3: // Left + Down
+		return 0
+	case 4: // Right only
+		return 14
+	case 5: // Left + Right (horizontal)
+		return 13
+	case 6: // Down + Right
+		return 2
+	case 7: // Left + Down + Right
+		return 4
+	case 8: // Up only
+		return 9
+	case 9: // Up + Left
+		return 8
+	case 10: // Up + Down (vertical)
+		return 5
+	case 11: // Up + Down + Left
+		return 6
+	case 12: // Up + Right
+		return 10
+	case 13: // Up + Right + Left
+		return 7
+	case 14: // Up + Down + Right
+		return 11
+	case 15: // All directions
+		return 15
+	default:
+		return 13
+	}
+}
+
 func (r *ShipRenderer) loadTileImage(imagePath string) *ebiten.Image {
 	// Check cache first
 	if img, ok := r.tileImages[imagePath]; ok {
@@ -241,7 +370,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 		return
 	}
 
-	if !r.showFloor {
+	if !r.showFloor && !r.showWall {
 		return
 	}
 
@@ -268,20 +397,26 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 		return
 	}
 
-	tileCount := 0
 	var minX, minY, maxX, maxY float64
 	firstTile := true
 
-	// First pass: find bounds
+	// First pass: find bounds (from both floor and wall tiles)
 	for _, itemInterface := range items {
 		item, ok := itemInterface.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// Check if this is a floor tile
 		itemName, ok := item["strName"].(string)
-		if !ok || len(itemName) < 8 || itemName[:8] != "ItmFloor" {
+		if !ok {
+			continue
+		}
+
+		// Check if this is a floor or wall tile (exclude Loose items)
+		isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor" && !strings.HasSuffix(itemName, "Loose")
+		isWall := len(itemName) >= 7 && itemName[:7] == "ItmWall" && !strings.HasSuffix(itemName, "Loose")
+
+		if !isFloor && !isWall {
 			continue
 		}
 
@@ -320,60 +455,103 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 	mx, my := ebiten.CursorPosition()
 	r.hoveredTile = nil
 
-	// Second pass: draw tiles
+	// Second pass: draw floors first
 	for _, itemInterface := range items {
 		item, ok := itemInterface.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// Check if this is a floor tile
 		itemName, ok := item["strName"].(string)
-		if !ok || len(itemName) < 8 || itemName[:8] != "ItmFloor" {
+		if !ok {
 			continue
 		}
 
-		// Get tile position
-		tileX, okX := item["fX"].(float64)
-		tileY, okY := item["fY"].(float64)
-		if !okX || !okY {
+		isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor" && !strings.HasSuffix(itemName, "Loose")
+		if !isFloor || !r.showFloor {
 			continue
 		}
 
-		// Get rotation
-		rotation := 0.0
-		if fRotation, ok := item["fRotation"].(float64); ok {
-			rotation = fRotation
+		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, false)
+	}
+
+	// Third pass: draw walls on top
+	for _, itemInterface := range items {
+		item, ok := itemInterface.(map[string]interface{})
+		if !ok {
+			continue
 		}
 
-		// Calculate draw position (flip Y-axis)
-		drawX := float32(int(x + r.offsetX + (float32(tileX)+centerX)*tileSize*r.scale))
-		drawY := float32(int(y + r.offsetY + (-float32(tileY)-centerY)*tileSize*r.scale))
-		drawSize := float32(int(tileSize * r.scale))
-
-		// Get the tile image path
-		imagePath := getTileImagePath(item, coMap, itemName)
-
-		// Check if mouse is hovering over this tile
-		isHovered := float32(mx) >= drawX && float32(mx) < drawX+drawSize &&
-			float32(my) >= drawY && float32(my) < drawY+drawSize
-		if isHovered {
-			r.hoveredTile = item
-			// Store the grid position for cursor tile placement
-			r.mouseGridX = tileX
-			r.mouseGridY = tileY
-			r.mouseInGrid = true
+		itemName, ok := item["strName"].(string)
+		if !ok {
+			continue
 		}
 
-		// Try to load and draw the tile image
-		tileImg := r.loadTileImage(imagePath)
-		if tileImg != nil {
+		isWall := len(itemName) >= 7 && itemName[:7] == "ItmWall" && !strings.HasSuffix(itemName, "Loose")
+		if !isWall || !r.showWall {
+			continue
+		}
+
+		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, true)
+	}
+
+	// Draw cursor preview
+	r.renderCursorPreview(cursorTile, items, coMap, clippedScreen, x, y, centerX, centerY)
+}
+
+func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, items []interface{}, coMap map[string]map[string]interface{}, clippedScreen *ebiten.Image, x, y, centerX, centerY float32, mx, my int, isWall bool) {
+	// Get tile position
+	tileX, okX := item["fX"].(float64)
+	tileY, okY := item["fY"].(float64)
+	if !okX || !okY {
+		return
+	}
+
+	// Get rotation
+	rotation := 0.0
+	if fRotation, ok := item["fRotation"].(float64); ok {
+		rotation = fRotation
+	}
+
+	// Calculate draw position (flip Y-axis)
+	drawX := float32(int(x + r.offsetX + (float32(tileX)+centerX)*tileSize*r.scale))
+	drawY := float32(int(y + r.offsetY + (-float32(tileY)-centerY)*tileSize*r.scale))
+	drawSize := float32(int(tileSize * r.scale))
+
+	// Get the tile image path
+	imagePath := getTileImagePath(item, coMap, itemName)
+
+	// Check if mouse is hovering over this tile
+	isHovered := float32(mx) >= drawX && float32(mx) < drawX+drawSize &&
+		float32(my) >= drawY && float32(my) < drawY+drawSize
+	if isHovered {
+		r.hoveredTile = item
+		// Store the grid position for cursor tile placement
+		r.mouseGridX = tileX
+		r.mouseGridY = tileY
+		r.mouseInGrid = true
+	}
+
+	// Try to load and draw the tile image
+	tileImg := r.loadTileImage(imagePath)
+	if tileImg != nil {
+		// For walls, extract the correct sprite from the 4x4 sheet
+		var spriteToRender *ebiten.Image
+		if isWall {
+			// TODO: Fix neighbor detection - for now just use index 13
+			spriteToRender = extractSpriteFromSheet(tileImg, 13)
+		} else {
+			// Floors use the full image
+			spriteToRender = tileImg
+		}
+
+		if spriteToRender != nil {
 			// Draw the actual tile image with rotation
 			opts := &ebiten.DrawImageOptions{}
 
 			// Scale
-			scaleX := drawSize / float32(tileImg.Bounds().Dx())
-			scaleY := drawSize / float32(tileImg.Bounds().Dy())
+			scaleX := drawSize / float32(spriteToRender.Bounds().Dx())
+			scaleY := drawSize / float32(spriteToRender.Bounds().Dy())
 			opts.GeoM.Scale(float64(scaleX), float64(scaleY))
 
 			opts.GeoM.Translate(-float64(drawSize)/2, -float64(drawSize)/2)
@@ -383,34 +561,49 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 
 			// Translate to position
 			opts.GeoM.Translate(float64(drawX), float64(drawY))
-			clippedScreen.DrawImage(tileImg, opts)
-		} else {
-			// Fallback to colored rectangle if image not found
-			tileColor := color.NRGBA{80, 120, 160, 255}
-			vector.DrawFilledRect(clippedScreen, drawX, drawY, drawSize, drawSize, tileColor, false)
-			borderColor := color.NRGBA{50, 50, 60, 255}
-			vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 1, borderColor, false)
+			clippedScreen.DrawImage(spriteToRender, opts)
 		}
-
-		// Highlight hovered tile
-		if isHovered {
-			highlightColor := color.NRGBA{255, 255, 0, 128}
-			vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 2, highlightColor, false)
-		}
-
-		tileCount++
+	} else {
+		// Fallback to colored rectangle if image not found
+		tileColor := color.NRGBA{80, 120, 160, 255}
+		vector.DrawFilledRect(clippedScreen, drawX, drawY, drawSize, drawSize, tileColor, false)
+		borderColor := color.NRGBA{50, 50, 60, 255}
+		vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 1, borderColor, false)
 	}
 
-	// Draw cursor tile preview at hovered tile position
-	if cursorTile != nil && r.mouseInGrid {
-		// Get cursor tile image path
-		cursorName := ""
-		if strName, ok := cursorTile["strName"].(string); ok {
-			cursorName = strName
+	// Highlight hovered tile
+	if isHovered {
+		highlightColor := color.NRGBA{255, 255, 0, 128}
+		vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 2, highlightColor, false)
+	}
+}
+
+func (r *ShipRenderer) renderCursorPreview(cursorTile map[string]interface{}, items []interface{}, coMap map[string]map[string]interface{}, clippedScreen *ebiten.Image, x, y, centerX, centerY float32) {
+	if cursorTile == nil || !r.mouseInGrid {
+		return
+	}
+
+	// Get cursor tile image path
+	cursorName := ""
+	if strName, ok := cursorTile["strName"].(string); ok {
+		cursorName = strName
+	}
+	cursorImagePath := getTileImagePath(cursorTile, coMap, cursorName)
+	cursorImg := r.loadTileImage(cursorImagePath)
+	if cursorImg != nil {
+		// Check if cursor tile is a wall
+		isCursorWall := len(cursorName) >= 7 && cursorName[:7] == "ItmWall"
+
+		// For walls, extract sprite based on what neighbors would be after placement
+		var spriteToRender *ebiten.Image
+		if isCursorWall {
+			// Use index 13 for cursor preview (standard wall segment)
+			spriteToRender = extractSpriteFromSheet(cursorImg, 13)
+		} else {
+			spriteToRender = cursorImg
 		}
-		cursorImagePath := getTileImagePath(cursorTile, coMap, cursorName)
-		cursorImg := r.loadTileImage(cursorImagePath)
-		if cursorImg != nil {
+
+		if spriteToRender != nil {
 			// Get cursor rotation
 			cursorRotation := 0.0
 			if fRotation, ok := cursorTile["fRotation"].(float64); ok {
@@ -429,7 +622,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 			opts := &ebiten.DrawImageOptions{}
 
 			// Scale to match current zoom
-			imgW, imgH := cursorImg.Bounds().Dx(), cursorImg.Bounds().Dy()
+			imgW, imgH := spriteToRender.Bounds().Dx(), spriteToRender.Bounds().Dy()
 			scaleX := drawSize / float32(imgW)
 			scaleY := drawSize / float32(imgH)
 			opts.GeoM.Scale(float64(scaleX), float64(scaleY))
@@ -445,7 +638,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 
 			// Draw with transparency
 			opts.ColorScale.ScaleAlpha(0.6)
-			clippedScreen.DrawImage(cursorImg, opts)
+			clippedScreen.DrawImage(spriteToRender, opts)
 
 			// Draw grid outline
 			outlineColor := color.NRGBA{0, 255, 255, 180}
@@ -460,6 +653,10 @@ func (r *ShipRenderer) ToggleFloor() {
 
 func (r *ShipRenderer) SetShowFloor(show bool) {
 	r.showFloor = show
+}
+
+func (r *ShipRenderer) SetShowWall(show bool) {
+	r.showWall = show
 }
 
 func (r *ShipRenderer) GetHoveredTile() map[string]interface{} {

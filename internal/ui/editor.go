@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"image"
 	"image/color"
 	"log"
 	"math"
@@ -12,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/ebitenui/ebitenui"
-	"github.com/ebitenui/ebitenui/image"
+	ebitenui_image "github.com/ebitenui/ebitenui/image"
 	"github.com/ebitenui/ebitenui/widget"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -39,9 +40,12 @@ type Editor struct {
 	filePathText *widget.Text
 	loadButton   *widget.Button
 	floorToggle  *widget.Button
+	wallToggle   *widget.Button
 	showFloor    bool
+	showWall     bool
 	tileInfoText *widget.Text
 	rKeyPressed  bool
+	currentLayer string // "floor" or "wall"
 
 	// Cursor tile for placement
 	cursorTile           map[string]interface{}
@@ -54,14 +58,19 @@ type Editor struct {
 	smallFontFace        *text.Face
 
 	// Tile palette rendering
-	paletteScrollY   int
-	paletteMaxScroll int
+	paletteScrollY       int
+	paletteMaxScroll     int
+	availableWallTiles   []map[string]interface{}
+	filteredWallTiles    []map[string]interface{}
+	layerChoiceContainer *widget.Container
 }
 
 func NewEditor() (*Editor, error) {
 	e := &Editor{
-		renderer:  renderer.NewShipRenderer(),
-		showFloor: true,
+		renderer:     renderer.NewShipRenderer(),
+		showFloor:    true,
+		showWall:     true,
+		currentLayer: "floor",
 	}
 
 	// Load font
@@ -76,8 +85,9 @@ func NewEditor() (*Editor, error) {
 	var face text.Face = goTextFace
 	e.fontFace = &face
 
-	// Build tile palette at startup
-	e.buildTilePalette()
+	// Build tile palettes at startup
+	e.buildFloorPalette()
+	e.buildWallPalette()
 
 	// Create UI
 	e.createUI()
@@ -88,7 +98,7 @@ func NewEditor() (*Editor, error) {
 func (e *Editor) createUI() {
 	// Main container with horizontal layout (left panel | center viewport | right panel)
 	rootContainer := widget.NewContainer(
-		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{20, 20, 30, 255})),
+		widget.ContainerOpts.BackgroundImage(ebitenui_image.NewNineSliceColor(color.NRGBA{20, 20, 30, 255})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(3),
 			widget.GridLayoutOpts.Stretch([]bool{false, true, false}, []bool{true}),
@@ -102,7 +112,7 @@ func (e *Editor) createUI() {
 
 	// Center viewport (ship rendering area - handled in Draw)
 	centerPanel := widget.NewContainer(
-		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{15, 15, 20, 255})),
+		widget.ContainerOpts.BackgroundImage(ebitenui_image.NewNineSliceColor(color.NRGBA{15, 15, 20, 255})),
 		widget.ContainerOpts.WidgetOpts(widget.WidgetOpts.MinSize(400, 600)),
 	)
 	rootContainer.AddChild(centerPanel)
@@ -118,7 +128,7 @@ func (e *Editor) createUI() {
 
 func (e *Editor) createLeftControlPanel() *widget.Container {
 	panel := widget.NewContainer(
-		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{35, 35, 45, 255})),
+		widget.ContainerOpts.BackgroundImage(ebitenui_image.NewNineSliceColor(color.NRGBA{35, 35, 45, 255})),
 		widget.ContainerOpts.WidgetOpts(widget.WidgetOpts.MinSize(300, 600)),
 		widget.ContainerOpts.Layout(widget.NewRowLayout(
 			widget.RowLayoutOpts.Direction(widget.DirectionVertical),
@@ -140,9 +150,9 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 			widget.WidgetOpts.MinSize(270, 35),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
-			Idle:    image.NewNineSliceColor(color.NRGBA{70, 100, 150, 255}),
-			Hover:   image.NewNineSliceColor(color.NRGBA{90, 120, 170, 255}),
-			Pressed: image.NewNineSliceColor(color.NRGBA{50, 80, 130, 255}),
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 100, 150, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{90, 120, 170, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 80, 130, 255}),
 		}),
 		widget.ButtonOpts.Text("Browse Ship...", e.fontFace, &widget.ButtonTextColor{
 			Idle: color.NRGBA{255, 255, 255, 255},
@@ -197,8 +207,8 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 			widget.WidgetOpts.MinSize(160, 25),
 		),
 		widget.TextInputOpts.Image(&widget.TextInputImage{
-			Idle:     image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
-			Disabled: image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
+			Idle:     ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+			Disabled: ebitenui_image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
 		}),
 		widget.TextInputOpts.Face(smallFontFace),
 		widget.TextInputOpts.Color(&widget.TextInputColor{
@@ -229,8 +239,8 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 			widget.WidgetOpts.MinSize(90, 25),
 		),
 		widget.TextInputOpts.Image(&widget.TextInputImage{
-			Idle:     image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
-			Disabled: image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
+			Idle:     ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+			Disabled: ebitenui_image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
 		}),
 		widget.TextInputOpts.Face(smallFontFace),
 		widget.TextInputOpts.Color(&widget.TextInputColor{
@@ -252,15 +262,24 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 	)
 	panel.AddChild(layersLabel)
 
+	// Layer toggles container (floor and wall side by side)
+	layerTogglesContainer := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(2),
+			widget.GridLayoutOpts.Stretch([]bool{true, true}, []bool{true}),
+			widget.GridLayoutOpts.Spacing(5, 5),
+		)),
+	)
+
 	// Floor layer toggle button
 	e.floorToggle = widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.MinSize(120, 25),
+			widget.WidgetOpts.MinSize(130, 25),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
-			Idle:    image.NewNineSliceColor(color.NRGBA{70, 150, 70, 255}),
-			Hover:   image.NewNineSliceColor(color.NRGBA{90, 170, 90, 255}),
-			Pressed: image.NewNineSliceColor(color.NRGBA{50, 130, 50, 255}),
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 150, 70, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{90, 170, 90, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 130, 50, 255}),
 		}),
 		widget.ButtonOpts.Text("Floor: ON", smallFontFace, &widget.ButtonTextColor{
 			Idle: color.NRGBA{255, 255, 255, 255},
@@ -270,7 +289,29 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 			e.toggleFloor()
 		}),
 	)
-	panel.AddChild(e.floorToggle)
+	layerTogglesContainer.AddChild(e.floorToggle)
+
+	// Wall layer toggle button
+	e.wallToggle = widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(130, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 100, 70, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{170, 120, 90, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{130, 80, 50, 255}),
+		}),
+		widget.ButtonOpts.Text("Wall: ON", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.toggleWall()
+		}),
+	)
+	layerTogglesContainer.AddChild(e.wallToggle)
+
+	panel.AddChild(layerTogglesContainer)
 
 	// Save button
 	saveButton := widget.NewButton(
@@ -278,9 +319,9 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 			widget.WidgetOpts.MinSize(270, 35),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
-			Idle:    image.NewNineSliceColor(color.NRGBA{70, 100, 70, 255}),
-			Hover:   image.NewNineSliceColor(color.NRGBA{90, 120, 90, 255}),
-			Pressed: image.NewNineSliceColor(color.NRGBA{50, 80, 50, 255}),
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 100, 70, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{90, 120, 90, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 80, 50, 255}),
 		}),
 		widget.ButtonOpts.Text("Save Ship", e.fontFace, &widget.ButtonTextColor{
 			Idle: color.NRGBA{255, 255, 255, 255},
@@ -320,12 +361,12 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 
 func (e *Editor) createRightTilePanel() *widget.Container {
 	panel := widget.NewContainer(
-		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{35, 35, 45, 255})),
+		widget.ContainerOpts.BackgroundImage(ebitenui_image.NewNineSliceColor(color.NRGBA{35, 35, 45, 255})),
 		widget.ContainerOpts.WidgetOpts(widget.WidgetOpts.MinSize(250, 600)),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(1),
-			// Rows: 0=title, 1=cursor label, 2=cursor text, 3=preview, 4=palette label, 5=search, 6=scroll, 7=instructions
-			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, false, false, false, false, false, true, false}),
+			// Rows: 0=title, 1=cursor label, 2=cursor text, 3=preview, 4=palette label, 5=layer choice, 6=search, 7=scroll, 8=instructions
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, false, false, false, false, false, false, true, false}),
 			widget.GridLayoutOpts.Spacing(10, 10),
 			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(15)),
 		)),
@@ -363,7 +404,7 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 
 	// Tile preview container (for rendering the cursor tile image) - smaller now
 	e.cursorTilePreview = widget.NewContainer(
-		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255})),
+		widget.ContainerOpts.BackgroundImage(ebitenui_image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255})),
 		widget.ContainerOpts.WidgetOpts(
 			widget.WidgetOpts.MinSize(220, 100),
 		),
@@ -376,14 +417,63 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 	)
 	panel.AddChild(paletteLabel)
 
+	// Layer choice buttons (Floor/Wall) - shown when both layers are visible
+	e.layerChoiceContainer = widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(2),
+			widget.GridLayoutOpts.Stretch([]bool{true, true}, []bool{true}),
+			widget.GridLayoutOpts.Spacing(5, 5),
+		)),
+	)
+
+	floorChoiceBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(105, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 150, 70, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{90, 170, 90, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 130, 50, 255}),
+		}),
+		widget.ButtonOpts.Text("Floor", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.setCurrentLayer("floor")
+		}),
+	)
+	e.layerChoiceContainer.AddChild(floorChoiceBtn)
+
+	wallChoiceBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(105, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 100, 70, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{170, 120, 90, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{130, 80, 50, 255}),
+		}),
+		widget.ButtonOpts.Text("Wall", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.setCurrentLayer("wall")
+		}),
+	)
+	e.layerChoiceContainer.AddChild(wallChoiceBtn)
+
+	panel.AddChild(e.layerChoiceContainer)
+
 	// Search input for filtering tiles
 	e.tileSearchInput = widget.NewTextInput(
 		widget.TextInputOpts.WidgetOpts(
 			widget.WidgetOpts.MinSize(220, 25),
 		),
 		widget.TextInputOpts.Image(&widget.TextInputImage{
-			Idle:     image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
-			Disabled: image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
+			Idle:     ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+			Disabled: ebitenui_image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
 		}),
 		widget.TextInputOpts.Face(smallFontFace),
 		widget.TextInputOpts.Color(&widget.TextInputColor{
@@ -423,8 +513,8 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 		widget.ScrollContainerOpts.Content(e.tilePaletteContainer),
 		widget.ScrollContainerOpts.StretchContentWidth(),
 		widget.ScrollContainerOpts.Image(&widget.ScrollContainerImage{
-			Idle: image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
-			Mask: image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
+			Idle: ebitenui_image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
+			Mask: ebitenui_image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
 		}),
 	)
 	scrollWrapper.AddChild(scrollContainer)
@@ -444,13 +534,13 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 		}),
 		widget.SliderOpts.Images(
 			&widget.SliderTrackImage{
-				Idle:  image.NewNineSliceColor(color.NRGBA{40, 40, 50, 255}),
-				Hover: image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+				Idle:  ebitenui_image.NewNineSliceColor(color.NRGBA{40, 40, 50, 255}),
+				Hover: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
 			},
 			&widget.ButtonImage{
-				Idle:    image.NewNineSliceColor(color.NRGBA{70, 70, 80, 255}),
-				Hover:   image.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
-				Pressed: image.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+				Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 70, 80, 255}),
+				Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+				Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
 			},
 		),
 	)
@@ -514,8 +604,8 @@ func (e *Editor) loadShip(path string) {
 	e.setStatus(fmt.Sprintf("Loaded: %s", filename))
 }
 
-func (e *Editor) buildTilePalette() {
-	// Build tile palette from cooverlays_floors.json in the data directory
+func (e *Editor) buildFloorPalette() {
+	// Build floor tile palette from cooverlays_floors.json in the data directory
 	dataPath := ""
 	if config.GlobalConfig != nil {
 		dataPath = config.GlobalConfig.Data
@@ -599,21 +689,121 @@ func (e *Editor) buildTilePalette() {
 	e.filterTilePalette("")
 }
 
-func (e *Editor) filterTilePalette(searchText string) {
-	if e.availableTiles == nil {
+func (e *Editor) buildWallPalette() {
+	// Build wall tile palette from cooverlays_walls.json in the data directory
+	dataPath := ""
+	if config.GlobalConfig != nil {
+		dataPath = config.GlobalConfig.Data
+	}
+
+	if dataPath == "" {
+		log.Printf("Warning: Data path not set, cannot build wall palette")
 		return
 	}
 
+	jsonPath := filepath.Join(dataPath, "cooverlays", "cooverlays_walls.json")
+
+	// Load JSON file
+	jsonData, err := loader.LoadJSON(jsonPath)
+	if err != nil {
+		log.Printf("Error loading cooverlays_walls.json: %v", err)
+		return
+	}
+
+	// Parse the JSON array
+	wallDefinitions, ok := jsonData.([]interface{})
+	if !ok {
+		log.Printf("Error: cooverlays_walls.json is not an array")
+		return
+	}
+
+	e.availableWallTiles = make([]map[string]interface{}, 0)
+
+	for _, wallDefInterface := range wallDefinitions {
+		wallDef, ok := wallDefInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		strName := getStringValue(wallDef, "strName")
+
+		// Only include wall tiles (but exclude ItmWall*Loose which are items, not walls)
+		if len(strName) < 7 || strName[:7] != "ItmWall" {
+			continue
+		}
+
+		// Filter out damaged, patched, and loose variants
+		// Note: Loose walls are considered items, not wall tiles
+		if strings.HasSuffix(strName, "Dmg") ||
+			strings.HasSuffix(strName, "Patch") ||
+			strings.HasSuffix(strName, "Loose") {
+			continue
+		}
+
+		// Create a tile template from the definition
+		tile := make(map[string]interface{})
+		tile["strName"] = strName
+		tile["fX"] = 0.0
+		tile["fY"] = 0.0
+		tile["fRotation"] = 0.0
+		tile["strID"] = e.generateGUID() // Generate a temporary ID
+
+		// Store the full CO definition from JSON for later use when placing tiles
+		tile["_coDefinition"] = wallDef
+
+		// Store additional info for later use (like image path)
+		if strImg, ok := wallDef["strImg"].(string); ok {
+			tile["strImg"] = strImg
+		}
+		if strNameFriendly, ok := wallDef["strNameFriendly"].(string); ok {
+			tile["strNameFriendly"] = strNameFriendly
+		}
+
+		e.availableWallTiles = append(e.availableWallTiles, tile)
+	}
+
+	// Sort tiles by name
+	sort.Slice(e.availableWallTiles, func(i, j int) bool {
+		return getStringValue(e.availableWallTiles[i], "strName") < getStringValue(e.availableWallTiles[j], "strName")
+	})
+
+	if config.Verbose {
+		log.Printf("Built wall palette with %d wall tiles from %s", len(e.availableWallTiles), jsonPath)
+	}
+
+	// Initialize filtered wall tiles
+	e.filteredWallTiles = e.availableWallTiles
+}
+
+func (e *Editor) filterTilePalette(searchText string) {
 	searchText = strings.ToLower(searchText)
 
-	if searchText == "" {
-		e.filteredTiles = e.availableTiles
-	} else {
-		e.filteredTiles = make([]map[string]interface{}, 0)
-		for _, tile := range e.availableTiles {
-			tileName := strings.ToLower(getStringValue(tile, "strName"))
-			if strings.Contains(tileName, searchText) {
-				e.filteredTiles = append(e.filteredTiles, tile)
+	// Filter floor tiles
+	if e.availableTiles != nil {
+		if searchText == "" {
+			e.filteredTiles = e.availableTiles
+		} else {
+			e.filteredTiles = make([]map[string]interface{}, 0)
+			for _, tile := range e.availableTiles {
+				tileName := strings.ToLower(getStringValue(tile, "strName"))
+				if strings.Contains(tileName, searchText) {
+					e.filteredTiles = append(e.filteredTiles, tile)
+				}
+			}
+		}
+	}
+
+	// Filter wall tiles
+	if e.availableWallTiles != nil {
+		if searchText == "" {
+			e.filteredWallTiles = e.availableWallTiles
+		} else {
+			e.filteredWallTiles = make([]map[string]interface{}, 0)
+			for _, tile := range e.availableWallTiles {
+				tileName := strings.ToLower(getStringValue(tile, "strName"))
+				if strings.Contains(tileName, searchText) {
+					e.filteredWallTiles = append(e.filteredWallTiles, tile)
+				}
 			}
 		}
 	}
@@ -630,8 +820,19 @@ func (e *Editor) rebuildTilePaletteUI() {
 	// Clear existing widgets
 	e.tilePaletteContainer.RemoveChildren()
 
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+
+	// Determine which tiles to show based on current layer
+	var tilesToShow []map[string]interface{}
+	if e.currentLayer == "wall" {
+		tilesToShow = e.filteredWallTiles
+	} else {
+		tilesToShow = e.filteredTiles
+	}
+
 	// Add all filtered tiles as buttons in a 5-column grid
-	for _, tile := range e.filteredTiles {
+	for _, tile := range tilesToShow {
 		tileName := getStringValue(tile, "strName")
 		// Use the strImg field from the preloaded tile data
 		imagePath := getStringValue(tile, "strImg")
@@ -640,15 +841,21 @@ func (e *Editor) rebuildTilePaletteUI() {
 		}
 		tileImg := e.renderer.LoadTileImage(imagePath)
 
+		// For walls, extract sprite at index 13 for palette preview
+		isWall := len(tileName) >= 7 && tileName[:7] == "ItmWall"
+		if isWall && tileImg != nil {
+			tileImg = e.extractSpriteFromSheet(tileImg, 13)
+		}
+
 		// Create button with tile image
 		btn := widget.NewButton(
 			widget.ButtonOpts.WidgetOpts(
 				widget.WidgetOpts.MinSize(40, 40),
 			),
 			widget.ButtonOpts.Image(&widget.ButtonImage{
-				Idle:    image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
-				Hover:   image.NewNineSliceColor(color.NRGBA{70, 100, 150, 255}),
-				Pressed: image.NewNineSliceColor(color.NRGBA{60, 90, 130, 255}),
+				Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+				Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{70, 100, 150, 255}),
+				Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{60, 90, 130, 255}),
 			}),
 			widget.ButtonOpts.Graphic(&widget.GraphicImage{
 				Idle: tileImg,
@@ -682,8 +889,8 @@ func (e *Editor) saveShip() {
 	e.currentShip.PublicName = e.nameInput.GetText()
 	e.currentShip.StrRegID = e.regIDInput.GetText()
 
-	// Clean up duplicate floor tiles before saving
-	e.removeDuplicateFloorTiles()
+	// Clean up duplicate tiles before saving
+	e.removeDuplicateTiles()
 
 	if err := loader.SaveShip(e.currentPath, e.currentShip); err != nil {
 		e.setStatus(fmt.Sprintf("Error: %v", err))
@@ -693,7 +900,7 @@ func (e *Editor) saveShip() {
 	e.setStatus(fmt.Sprintf("Saved: %s", filepath.Base(e.currentPath)))
 }
 
-func (e *Editor) removeDuplicateFloorTiles() {
+func (e *Editor) removeDuplicateTiles() {
 	if e.currentShip == nil {
 		return
 	}
@@ -708,19 +915,25 @@ func (e *Editor) removeDuplicateFloorTiles() {
 		return
 	}
 
-	// Track tiles by position (x,y) -> list of tile indices
+	// Track tiles by position and layer (x,y,layer) -> list of tile indices
 	type posKey struct {
-		x, y float64
+		x, y  float64
+		layer string // "floor" or "wall"
 	}
 	positionMap := make(map[posKey][]int)
 
-	// Build map of positions to tile indices (floor tiles only)
+	// Build map of positions to tile indices (floor and wall tiles)
 	for i, itemInterface := range aItems {
 		if item, ok := itemInterface.(map[string]interface{}); ok {
 			strName := getStringValue(item, "strName")
 
-			// Only process floor tiles (ItmFloor*)
-			if len(strName) < 8 || strName[:8] != "ItmFloor" {
+			// Determine layer
+			var layer string
+			if len(strName) >= 8 && strName[:8] == "ItmFloor" {
+				layer = "floor"
+			} else if len(strName) >= 7 && strName[:7] == "ItmWall" {
+				layer = "wall"
+			} else {
 				continue
 			}
 
@@ -731,7 +944,7 @@ func (e *Editor) removeDuplicateFloorTiles() {
 
 			x := getFloatValue(item, "fX")
 			y := getFloatValue(item, "fY")
-			key := posKey{x, y}
+			key := posKey{x, y, layer}
 			positionMap[key] = append(positionMap[key], i)
 		}
 	}
@@ -743,7 +956,7 @@ func (e *Editor) removeDuplicateFloorTiles() {
 	for pos, indices := range positionMap {
 		if len(indices) > 1 {
 			if config.Verbose {
-				log.Printf("Found %d tiles at position (%.0f, %.0f), keeping last one", len(indices), pos.x, pos.y)
+				log.Printf("Found %d %s tiles at position (%.0f, %.0f), keeping last one", len(indices), pos.layer, pos.x, pos.y)
 			}
 			// Keep the last tile (highest index), remove all others
 			for i := 0; i < len(indices)-1; i++ {
@@ -818,6 +1031,59 @@ func (e *Editor) toggleFloor() {
 		e.floorToggle.Text().Label = "Floor: ON"
 	} else {
 		e.floorToggle.Text().Label = "Floor: OFF"
+		// If floor is turned off and current layer is floor, switch to wall
+		if e.currentLayer == "floor" && e.showWall {
+			e.setCurrentLayer("wall")
+		}
+	}
+
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) toggleWall() {
+	e.showWall = !e.showWall
+	e.renderer.SetShowWall(e.showWall)
+
+	// Update button text
+	if e.showWall {
+		e.wallToggle.Text().Label = "Wall: ON"
+	} else {
+		e.wallToggle.Text().Label = "Wall: OFF"
+		// If wall is turned off and current layer is wall, switch to floor
+		if e.currentLayer == "wall" && e.showFloor {
+			e.setCurrentLayer("floor")
+		}
+	}
+
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) setCurrentLayer(layer string) {
+	e.currentLayer = layer
+	e.setStatus(fmt.Sprintf("Switched to %s layer", layer))
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) updateLayerChoiceVisibility() {
+	if e.layerChoiceContainer == nil {
+		return
+	}
+
+	// Show layer choice buttons only when both layers are visible
+	if e.showFloor && e.showWall {
+		e.layerChoiceContainer.GetWidget().Visibility = widget.Visibility_Show
+	} else {
+		e.layerChoiceContainer.GetWidget().Visibility = widget.Visibility_Hide
+		// Auto-select the visible layer
+		if e.showFloor && !e.showWall {
+			e.currentLayer = "floor"
+		} else if e.showWall && !e.showFloor {
+			e.currentLayer = "wall"
+		}
 	}
 }
 
@@ -1184,6 +1450,38 @@ func getFloatValue(m map[string]interface{}, key string) float64 {
 	return 0.0
 }
 
+// extractSpriteFromSheet extracts a single sprite from a 4x4 sprite sheet
+// index is 0-15, representing position in the sheet (0-indexed):
+//
+//	0  1  2  3
+//	4  5  6  7
+//	8  9 10 11
+//
+// 12 13 14 15
+func (e *Editor) extractSpriteFromSheet(sheet *ebiten.Image, index int) *ebiten.Image {
+	if sheet == nil {
+		return nil
+	}
+
+	sheetWidth := sheet.Bounds().Dx()
+	sheetHeight := sheet.Bounds().Dy()
+
+	// Calculate tile size (4x4 grid)
+	tileWidth := sheetWidth / 4
+	tileHeight := sheetHeight / 4
+
+	// Calculate position in grid (0-indexed)
+	row := index / 4
+	col := index % 4
+
+	// Extract the sub-image
+	x := col * tileWidth
+	y := row * tileHeight
+	rect := image.Rect(x, y, x+tileWidth, y+tileHeight)
+
+	return sheet.SubImage(rect).(*ebiten.Image)
+}
+
 func (e *Editor) Draw(screen *ebiten.Image) {
 	e.UI.Draw(screen)
 
@@ -1222,6 +1520,15 @@ func (e *Editor) renderCursorTilePreview(screen *ebiten.Image) {
 
 	if tileImg == nil {
 		return
+	}
+
+	// For walls, extract sprite at index 13 for preview
+	isWall := len(cursorName) >= 7 && cursorName[:7] == "ItmWall"
+	if isWall {
+		tileImg = e.extractSpriteFromSheet(tileImg, 13)
+		if tileImg == nil {
+			return
+		}
 	}
 
 	// Get cursor rotation
