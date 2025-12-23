@@ -40,6 +40,9 @@ type ShipRenderer struct {
 	mouseGridX  float64
 	mouseGridY  float64
 	mouseInGrid bool
+
+	// Paint mode - when true, left-click paints instead of panning
+	paintMode bool
 }
 
 func NewShipRenderer() *ShipRenderer {
@@ -85,8 +88,8 @@ func (r *ShipRenderer) Update() {
 		}
 	}
 
-	// Handle mouse drag for panning
-	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+	// Handle mouse drag for panning (only when not in paint mode)
+	if !r.paintMode && ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		if r.isDragging {
 			dx := mx - r.lastMouseX
 			dy := my - r.lastMouseY
@@ -119,15 +122,24 @@ func (r *ShipRenderer) Update() {
 // getTileImagePath extracts the image path from a tile using the CO lookup map
 func getTileImagePath(tile map[string]interface{}, coMap map[string]map[string]interface{}, fallbackName string) string {
 	var imagePath string
-	if strID, ok := tile["strID"].(string); ok {
-		if co, ok := coMap[strID]; ok {
-			if strIMGPreview, ok := co["strIMGPreview"].(string); ok {
-				imagePath = strIMGPreview
+
+	// First, try to get strImg from the tile itself (from palette/preloaded data)
+	if strImg, ok := tile["strImg"].(string); ok && strImg != "" {
+		imagePath = strImg
+	}
+
+	// Then try to get strIMGPreview from the CO
+	if imagePath == "" {
+		if strID, ok := tile["strID"].(string); ok {
+			if co, ok := coMap[strID]; ok {
+				if strIMGPreview, ok := co["strIMGPreview"].(string); ok {
+					imagePath = strIMGPreview
+				}
 			}
 		}
 	}
 
-	// Fallback to provided name if no strIMGPreview found
+	// Fallback to provided name if no image path found
 	if imagePath == "" {
 		imagePath = fallbackName
 	}
@@ -459,4 +471,14 @@ func (r *ShipRenderer) GetHoveredTile() map[string]interface{} {
 // Returns (gridX, gridY, valid)
 func (r *ShipRenderer) GetMouseGridPos() (float64, float64, bool) {
 	return r.mouseGridX, r.mouseGridY, r.mouseInGrid
+}
+
+// LoadTileImage exposes the tile image loading function for external use
+func (r *ShipRenderer) LoadTileImage(imagePath string) *ebiten.Image {
+	return r.loadTileImage(imagePath)
+}
+
+// SetPaintMode enables or disables paint mode (disables panning when true)
+func (r *ShipRenderer) SetPaintMode(enabled bool) {
+	r.paintMode = enabled
 }

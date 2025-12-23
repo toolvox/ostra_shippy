@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"image/color"
 	"log"
+	"math"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/ebitenui/ebitenui"
 	"github.com/ebitenui/ebitenui/image"
@@ -41,8 +44,18 @@ type Editor struct {
 	rKeyPressed  bool
 
 	// Cursor tile for placement
-	cursorTile     map[string]interface{}
-	cursorTileText *widget.Text
+	cursorTile           map[string]interface{}
+	cursorTileText       *widget.Text
+	cursorTilePreview    *widget.Container
+	tilePaletteContainer *widget.Container
+	tileSearchInput      *widget.TextInput
+	availableTiles       []map[string]interface{}
+	filteredTiles        []map[string]interface{}
+	smallFontFace        *text.Face
+
+	// Tile palette rendering
+	paletteScrollY   int
+	paletteMaxScroll int
 }
 
 func NewEditor() (*Editor, error) {
@@ -62,6 +75,9 @@ func NewEditor() (*Editor, error) {
 	}
 	var face text.Face = goTextFace
 	e.fontFace = &face
+
+	// Build tile palette at startup
+	e.buildTilePalette()
 
 	// Create UI
 	e.createUI()
@@ -306,10 +322,12 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 	panel := widget.NewContainer(
 		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{35, 35, 45, 255})),
 		widget.ContainerOpts.WidgetOpts(widget.WidgetOpts.MinSize(250, 600)),
-		widget.ContainerOpts.Layout(widget.NewRowLayout(
-			widget.RowLayoutOpts.Direction(widget.DirectionVertical),
-			widget.RowLayoutOpts.Spacing(10),
-			widget.RowLayoutOpts.Padding(widget.NewInsetsSimple(15)),
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(1),
+			// Rows: 0=title, 1=cursor label, 2=cursor text, 3=preview, 4=palette label, 5=search, 6=scroll, 7=instructions
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, false, false, false, false, false, true, false}),
+			widget.GridLayoutOpts.Spacing(10, 10),
+			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(15)),
 		)),
 	)
 
@@ -320,19 +338,14 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 		Size:   9,
 	}
 	var smallFace text.Face = smallGoTextFace
-	smallFontFace := &smallFace
+	e.smallFontFace = &smallFace
+	smallFontFace := e.smallFontFace
 
 	// Title
 	title := widget.NewText(
 		widget.TextOpts.Text("Tile Selector", e.fontFace, color.NRGBA{220, 220, 255, 255}),
 	)
 	panel.AddChild(title)
-
-	// Note about floor mode
-	noteText := widget.NewText(
-		widget.TextOpts.Text("(Only visible when\nFloor layer is ON)", smallFontFace, color.NRGBA{150, 150, 170, 255}),
-	)
-	panel.AddChild(noteText)
 
 	// Cursor tile info
 	cursorLabel := widget.NewText(
@@ -348,9 +361,113 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 	)
 	panel.AddChild(e.cursorTileText)
 
+	// Tile preview container (for rendering the cursor tile image) - smaller now
+	e.cursorTilePreview = widget.NewContainer(
+		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255})),
+		widget.ContainerOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(220, 100),
+		),
+	)
+	panel.AddChild(e.cursorTilePreview)
+
+	// Tile Palette section
+	paletteLabel := widget.NewText(
+		widget.TextOpts.Text("\nTile Palette:", smallFontFace, color.NRGBA{180, 180, 200, 255}),
+	)
+	panel.AddChild(paletteLabel)
+
+	// Search input for filtering tiles
+	e.tileSearchInput = widget.NewTextInput(
+		widget.TextInputOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(220, 25),
+		),
+		widget.TextInputOpts.Image(&widget.TextInputImage{
+			Idle:     image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+			Disabled: image.NewNineSliceColor(color.NRGBA{30, 30, 35, 255}),
+		}),
+		widget.TextInputOpts.Face(smallFontFace),
+		widget.TextInputOpts.Color(&widget.TextInputColor{
+			Idle:          color.NRGBA{255, 255, 255, 255},
+			Disabled:      color.NRGBA{100, 100, 100, 255},
+			Caret:         color.NRGBA{255, 255, 255, 255},
+			DisabledCaret: color.NRGBA{100, 100, 100, 255},
+		}),
+		widget.TextInputOpts.Placeholder("Search tiles..."),
+		widget.TextInputOpts.Padding(widget.NewInsetsSimple(3)),
+		widget.TextInputOpts.ChangedHandler(func(args *widget.TextInputChangedEventArgs) {
+			e.filterTilePalette(args.InputText)
+		}),
+	)
+	panel.AddChild(e.tileSearchInput)
+
+	// Content container for tiles - use GridLayout for 5 columns of tiles
+	e.tilePaletteContainer = widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(5),
+			widget.GridLayoutOpts.Spacing(2, 2),
+			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(5)),
+		)),
+	)
+
+	// Container to hold scroll container + slider in 2 columns
+	scrollWrapper := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(2),
+			widget.GridLayoutOpts.Stretch([]bool{true, false}, []bool{true}),
+			widget.GridLayoutOpts.Spacing(2, 0),
+		)),
+	)
+
+	// ScrollContainer
+	scrollContainer := widget.NewScrollContainer(
+		widget.ScrollContainerOpts.Content(e.tilePaletteContainer),
+		widget.ScrollContainerOpts.StretchContentWidth(),
+		widget.ScrollContainerOpts.Image(&widget.ScrollContainerImage{
+			Idle: image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
+			Mask: image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
+		}),
+	)
+	scrollWrapper.AddChild(scrollContainer)
+
+	// Page size function for slider
+	pageSizeFunc := func() int {
+		return int(math.Round(float64(scrollContainer.ViewRect().Dy())/float64(e.tilePaletteContainer.GetWidget().Rect.Dy())*1000) / 3)
+	}
+
+	// Vertical slider for scrolling
+	vSlider := widget.NewSlider(
+		widget.SliderOpts.Direction(widget.DirectionVertical),
+		widget.SliderOpts.MinMax(0, 1000),
+		widget.SliderOpts.PageSizeFunc(pageSizeFunc),
+		widget.SliderOpts.ChangedHandler(func(args *widget.SliderChangedEventArgs) {
+			scrollContainer.ScrollTop = float64(args.Slider.Current) / 1000
+		}),
+		widget.SliderOpts.Images(
+			&widget.SliderTrackImage{
+				Idle:  image.NewNineSliceColor(color.NRGBA{40, 40, 50, 255}),
+				Hover: image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+			},
+			&widget.ButtonImage{
+				Idle:    image.NewNineSliceColor(color.NRGBA{70, 70, 80, 255}),
+				Hover:   image.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+				Pressed: image.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+			},
+		),
+	)
+
+	// Sync slider with scroll events
+	scrollContainer.GetWidget().ScrolledEvent.AddHandler(func(args interface{}) {
+		if a, ok := args.(*widget.WidgetScrolledEventArgs); ok {
+			vSlider.Current -= int(math.Round(a.Y * float64(pageSizeFunc())))
+		}
+	})
+
+	scrollWrapper.AddChild(vSlider)
+	panel.AddChild(scrollWrapper)
+
 	// Instructions
 	instructionsText := widget.NewText(
-		widget.TextOpts.Text("\nInstructions:\n• Q: Copy hovered tile\n• Left-click: Place tile\n• R: Rotate tile", smallFontFace, color.NRGBA{120, 120, 140, 255}),
+		widget.TextOpts.Text("\nInstructions:\n• Q: Copy hovered tile\n• ESC: Deselect tile\n• Left-click: Place tile\n• R: Rotate tile", smallFontFace, color.NRGBA{120, 120, 140, 255}),
 		widget.TextOpts.WidgetOpts(
 			widget.WidgetOpts.MinSize(220, 100),
 		),
@@ -391,7 +508,168 @@ func (e *Editor) loadShip(path string) {
 	e.filePathText.Label = filename
 	fmt.Printf("Loaded ship: %s\n", path)
 
+	// Rebuild tile palette UI now that we have a ship loaded
+	e.rebuildTilePaletteUI()
+
 	e.setStatus(fmt.Sprintf("Loaded: %s", filename))
+}
+
+func (e *Editor) buildTilePalette() {
+	// Build tile palette from cooverlays_floors.json in the data directory
+	dataPath := ""
+	if config.GlobalConfig != nil {
+		dataPath = config.GlobalConfig.Data
+	}
+
+	if dataPath == "" {
+		log.Printf("Warning: Data path not set, cannot build tile palette")
+		return
+	}
+
+	jsonPath := filepath.Join(dataPath, "cooverlays", "cooverlays_floors.json")
+
+	// Load JSON file
+	jsonData, err := loader.LoadJSON(jsonPath)
+	if err != nil {
+		log.Printf("Error loading cooverlays_floors.json: %v", err)
+		return
+	}
+
+	// Parse the JSON array
+	tileDefinitions, ok := jsonData.([]interface{})
+	if !ok {
+		log.Printf("Error: cooverlays_floors.json is not an array")
+		return
+	}
+
+	e.availableTiles = make([]map[string]interface{}, 0)
+
+	for _, tileDefInterface := range tileDefinitions {
+		tileDef, ok := tileDefInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		strName := getStringValue(tileDef, "strName")
+
+		// Only include floor tiles
+		if len(strName) < 8 || strName[:8] != "ItmFloor" {
+			continue
+		}
+
+		// Filter out damaged, patched, and loose variants
+		if strings.HasSuffix(strName, "Dmg") ||
+			strings.HasSuffix(strName, "Patch") ||
+			strings.HasSuffix(strName, "Loose") {
+			continue
+		}
+
+		// Create a tile template from the definition
+		tile := make(map[string]interface{})
+		tile["strName"] = strName
+		tile["fX"] = 0.0
+		tile["fY"] = 0.0
+		tile["fRotation"] = 0.0
+		tile["strID"] = e.generateGUID() // Generate a temporary ID
+
+		// Store the full CO definition from JSON for later use when placing tiles
+		tile["_coDefinition"] = tileDef
+
+		// Store additional info for later use (like image path)
+		if strImg, ok := tileDef["strImg"].(string); ok {
+			tile["strImg"] = strImg
+		}
+		if strNameFriendly, ok := tileDef["strNameFriendly"].(string); ok {
+			tile["strNameFriendly"] = strNameFriendly
+		}
+
+		e.availableTiles = append(e.availableTiles, tile)
+	}
+
+	// Sort tiles by name
+	sort.Slice(e.availableTiles, func(i, j int) bool {
+		return getStringValue(e.availableTiles[i], "strName") < getStringValue(e.availableTiles[j], "strName")
+	})
+
+	if config.Verbose {
+		log.Printf("Built tile palette with %d floor tiles from %s", len(e.availableTiles), jsonPath)
+	}
+
+	// Initialize filtered tiles
+	e.filterTilePalette("")
+}
+
+func (e *Editor) filterTilePalette(searchText string) {
+	if e.availableTiles == nil {
+		return
+	}
+
+	searchText = strings.ToLower(searchText)
+
+	if searchText == "" {
+		e.filteredTiles = e.availableTiles
+	} else {
+		e.filteredTiles = make([]map[string]interface{}, 0)
+		for _, tile := range e.availableTiles {
+			tileName := strings.ToLower(getStringValue(tile, "strName"))
+			if strings.Contains(tileName, searchText) {
+				e.filteredTiles = append(e.filteredTiles, tile)
+			}
+		}
+	}
+
+	// Rebuild the tile palette UI
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) rebuildTilePaletteUI() {
+	if e.tilePaletteContainer == nil {
+		return
+	}
+
+	// Clear existing widgets
+	e.tilePaletteContainer.RemoveChildren()
+
+	// Add all filtered tiles as buttons in a 5-column grid
+	for _, tile := range e.filteredTiles {
+		tileName := getStringValue(tile, "strName")
+		// Use the strImg field from the preloaded tile data
+		imagePath := getStringValue(tile, "strImg")
+		if imagePath == "" {
+			imagePath = tileName
+		}
+		tileImg := e.renderer.LoadTileImage(imagePath)
+
+		// Create button with tile image
+		btn := widget.NewButton(
+			widget.ButtonOpts.WidgetOpts(
+				widget.WidgetOpts.MinSize(40, 40),
+			),
+			widget.ButtonOpts.Image(&widget.ButtonImage{
+				Idle:    image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
+				Hover:   image.NewNineSliceColor(color.NRGBA{70, 100, 150, 255}),
+				Pressed: image.NewNineSliceColor(color.NRGBA{60, 90, 130, 255}),
+			}),
+			widget.ButtonOpts.Graphic(&widget.GraphicImage{
+				Idle: tileImg,
+			}),
+			widget.ButtonOpts.GraphicPadding(widget.Insets{Top: 4, Bottom: 4, Left: 4, Right: 4}),
+			widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+				e.selectTileFromPalette(tile)
+			}),
+		)
+
+		e.tilePaletteContainer.AddChild(btn)
+	}
+}
+
+func (e *Editor) selectTileFromPalette(tile map[string]interface{}) {
+	// Deep copy the tile
+	e.cursorTile = make(map[string]interface{})
+	for k, v := range tile {
+		e.cursorTile[k] = v
+	}
+	e.setStatus(fmt.Sprintf("Selected from palette: %s", getStringValue(tile, "strName")))
 }
 
 func (e *Editor) saveShip() {
@@ -545,16 +823,57 @@ func (e *Editor) toggleFloor() {
 
 func (e *Editor) Update() {
 	e.UI.Update()
+
+	// Set paint mode based on whether cursor tile is selected
+	e.renderer.SetPaintMode(e.cursorTile != nil)
+
 	e.renderer.Update()
 
 	// Update tile info display
 	hoveredTile := e.renderer.GetHoveredTile()
+
+	// Handle Q key to copy hovered tile to cursor
+	if inpututil.IsKeyJustPressed(ebiten.KeyQ) && hoveredTile != nil {
+		e.copyCursorTile(hoveredTile)
+	}
+
+	// Handle ESC key to deselect cursor tile
+	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) && e.cursorTile != nil {
+		e.cursorTile = nil
+		e.setStatus("Tile deselected")
+	}
+
 	if hoveredTile != nil {
 		info := "strName: " + getStringValue(hoveredTile, "strName") + "\n"
 		info += "strID: " + getStringValue(hoveredTile, "strID") + "\n"
 		info += fmt.Sprintf("fX: %.2f\n", getFloatValue(hoveredTile, "fX"))
 		info += fmt.Sprintf("fY: %.2f\n", getFloatValue(hoveredTile, "fY"))
-		info += fmt.Sprintf("fRotation: %.2f", getFloatValue(hoveredTile, "fRotation"))
+		info += fmt.Sprintf("fRotation: %.2f\n", getFloatValue(hoveredTile, "fRotation"))
+
+		// Add CO information if available
+		if e.currentShip != nil {
+			tileID := getStringValue(hoveredTile, "strID")
+			if aCOs, ok := e.currentShip.RawData["aCOs"].([]interface{}); ok {
+				for _, coInterface := range aCOs {
+					if co, ok := coInterface.(map[string]interface{}); ok {
+						if coID, ok := co["strID"].(string); ok && coID == tileID {
+							info += "\nCO Data:\n"
+							if strIMGPreview := getStringValue(co, "strIMGPreview"); strIMGPreview != "" {
+								info += "strIMGPreview: " + strIMGPreview + "\n"
+							}
+							if strCODef := getStringValue(co, "strCODef"); strCODef != "" {
+								info += "strCODef: " + strCODef + "\n"
+							}
+							if strCOBase := getStringValue(co, "strCOBase"); strCOBase != "" {
+								info += "strCOBase: " + strCOBase
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+
 		e.tileInfoText.Label = info
 
 		// Handle R key to rotate tile
@@ -567,11 +886,6 @@ func (e *Editor) Update() {
 			hoveredTile["fRotation"] = newRotation
 			e.setStatus(fmt.Sprintf("Rotated tile to %.0f°", newRotation))
 		}
-
-		// Handle Q key to copy tile to cursor
-		if inpututil.IsKeyJustPressed(ebiten.KeyQ) {
-			e.copyCursorTile(hoveredTile)
-		}
 	} else {
 		e.tileInfoText.Label = "Hover over a tile..."
 	}
@@ -579,9 +893,14 @@ func (e *Editor) Update() {
 	// Update cursor tile display
 	e.updateCursorTileDisplay()
 
-	// Handle left-click for tile placement
-	if e.cursorTile != nil && inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		e.placeTileAtMouse()
+	// Handle tile placement: left-click or hovering while holding left button in paint mode
+	if e.cursorTile != nil {
+		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			e.placeTileAtMouse()
+		} else if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && hoveredTile != nil {
+			// Paint continuously while dragging in paint mode
+			e.placeTileAtMouse()
+		}
 	}
 }
 
@@ -733,66 +1052,95 @@ func (e *Editor) replaceTileAt(tileX, tileY float64, targetTileID string) {
 		newTile["strSlotParentID"] = strSlotParentID
 	}
 
-	// Find the cursor tile's CO definition to copy
-	cursorTileID := getStringValue(e.cursorTile, "strID")
-	var cursorCO map[string]interface{}
-	for _, coInterface := range aCOs {
-		if co, ok := coInterface.(map[string]interface{}); ok {
-			if strID, ok := co["strID"].(string); ok && strID == cursorTileID {
-				cursorCO = co
-				break
+	// Copy strImg if it exists (for palette tiles)
+	if strImg, ok := e.cursorTile["strImg"].(string); ok && strImg != "" {
+		newTile["strImg"] = strImg
+	}
+
+	// Find the old tile's CO and update it in place
+	var targetCO map[string]interface{}
+
+	// Find the CO that belongs to the old tile we're replacing
+	if oldTileID != "" {
+		for _, coInterface := range aCOs {
+			if co, ok := coInterface.(map[string]interface{}); ok {
+				if strID, ok := co["strID"].(string); ok && strID == oldTileID {
+					targetCO = co
+					if config.Verbose {
+						log.Printf("Found old CO to update in place: strID=%s", oldTileID)
+					}
+					break
+				}
 			}
 		}
 	}
 
-	if config.Verbose {
-		if cursorCO != nil {
-			log.Printf("Found cursor tile's CO: strCODef=%s", getStringValue(cursorCO, "strCODef"))
-		} else {
-			log.Printf("WARNING: Could not find CO for cursor tile ID: %s", cursorTileID)
+	// If we found the old CO, update it with the cursor tile's data
+	if targetCO != nil {
+		// Get the cursor tile's CO definition (from palette or existing tile)
+		cursorTileID := getStringValue(e.cursorTile, "strID")
+		var cursorCO map[string]interface{}
+
+		// Try to find cursor tile's CO in ship's aCOs
+		for _, coInterface := range aCOs {
+			if co, ok := coInterface.(map[string]interface{}); ok {
+				if strID, ok := co["strID"].(string); ok && strID == cursorTileID {
+					cursorCO = co
+					break
+				}
+			}
 		}
-	}
 
-	// Create new CO based on cursor tile's CO
-	if cursorCO != nil {
-		newCO := make(map[string]interface{})
+		// Update the old CO with cursor tile's data
+		if cursorCO != nil {
+			// Copy all fields from cursor tile's CO except strID
+			for k, v := range cursorCO {
+				if k != "strID" {
+					targetCO[k] = v
+				}
+			}
+			if config.Verbose {
+				log.Printf("Updated CO in place with cursor tile data")
+			}
+		} else {
+			// Cursor tile is from palette, use the stored CO definition from JSON
+			if coDefinition, ok := e.cursorTile["_coDefinition"].(map[string]interface{}); ok {
+				// Only update specific fields that should change, not all fields from the overlay definition
+				// The overlay JSON has different structure than ship COs
 
-		// Copy all CO fields from cursor tile's CO
-		for k, v := range cursorCO {
-			newCO[k] = v
+				// Update strCODef if it exists in the definition
+				if strCODef, ok := coDefinition["strName"].(string); ok {
+					targetCO["strCODef"] = strCODef
+				}
+
+				// Update image paths
+				if strImg, ok := coDefinition["strImg"].(string); ok {
+					targetCO["strIMGPreview"] = strImg
+				}
+
+				if config.Verbose {
+					log.Printf("Updated CO in place with palette tile: strCODef=%s", getStringValue(targetCO, "strCODef"))
+				}
+			} else {
+				// Fallback: just update image if no CO definition available
+				if strImg, ok := e.cursorTile["strImg"].(string); ok && strImg != "" {
+					targetCO["strIMGPreview"] = strImg
+				}
+				if config.Verbose {
+					log.Printf("Updated CO in place with palette tile image only: %s", getStringValue(e.cursorTile, "strImg"))
+				}
+			}
 		}
 
 		// Update the CO's ID to match the new tile
-		newCO["strID"] = newGUID
-
-		// If replacing an old tile, find and remove its CO
-		if oldTileID != "" {
-			removed := false
-			for i, coInterface := range aCOs {
-				if co, ok := coInterface.(map[string]interface{}); ok {
-					if strID, ok := co["strID"].(string); ok && strID == oldTileID {
-						// Remove old CO
-						if config.Verbose {
-							log.Printf("Removed old CO: strCODef=%s, strID=%s", getStringValue(co, "strCODef"), oldTileID)
-						}
-						aCOs = append(aCOs[:i], aCOs[i+1:]...)
-						removed = true
-						break
-					}
-				}
-			}
-			if config.Verbose && !removed {
-				log.Printf("WARNING: Could not find old CO to remove: %s", oldTileID)
-			}
-		}
-
-		// Add new CO to aCOs
-		aCOs = append(aCOs, newCO)
-		e.currentShip.RawData["aCOs"] = aCOs
+		targetCO["strID"] = newGUID
 
 		if config.Verbose {
-			log.Printf("Added new CO with ID: %s, strCODef: %s", newGUID, getStringValue(newCO, "strCODef"))
-			log.Printf("Total COs: %d", len(aCOs))
+			log.Printf("Updated CO ID from %s to %s", oldTileID, newGUID)
+		}
+	} else {
+		if config.Verbose {
+			log.Printf("WARNING: Could not find old CO to update for tile: %s", oldTileID)
 		}
 	}
 
@@ -851,4 +1199,91 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 	if e.currentShip != nil {
 		e.renderer.Render(screen, e.currentShip, centerX, centerY, centerWidth, centerHeight, e.cursorTile)
 	}
+
+	// Render cursor tile preview in the right panel
+	e.renderCursorTilePreview(screen)
+}
+
+func (e *Editor) renderCursorTilePreview(screen *ebiten.Image) {
+	if e.cursorTile == nil {
+		return
+	}
+
+	// Get the preview container's bounds
+	rect := e.cursorTilePreview.GetWidget().Rect
+
+	// Get tile image using the strImg field from the preloaded tile data
+	cursorName := getStringValue(e.cursorTile, "strName")
+	imagePath := getStringValue(e.cursorTile, "strImg")
+	if imagePath == "" {
+		imagePath = cursorName
+	}
+	tileImg := e.renderer.LoadTileImage(imagePath)
+
+	if tileImg == nil {
+		return
+	}
+
+	// Get cursor rotation
+	cursorRotation := getFloatValue(e.cursorTile, "fRotation")
+
+	// Calculate centered position within the preview container
+	containerW := float32(rect.Dx())
+	containerH := float32(rect.Dy())
+	imgW := float32(tileImg.Bounds().Dx())
+	imgH := float32(tileImg.Bounds().Dy())
+
+	// Scale to fit container while maintaining aspect ratio (max 80x80)
+	maxSize := float32(80.0)
+	scale := maxSize / imgW
+	if imgH > imgW {
+		scale = maxSize / imgH
+	}
+
+	scaledW := imgW * scale
+	scaledH := imgH * scale
+
+	// Center in container
+	offsetX := float32(rect.Min.X) + (containerW-scaledW)/2
+	offsetY := float32(rect.Min.Y) + (containerH-scaledH)/2
+
+	// Draw the tile image with rotation
+	opts := &ebiten.DrawImageOptions{}
+	opts.GeoM.Scale(float64(scale), float64(scale))
+
+	// Apply rotation around center
+	opts.GeoM.Translate(-float64(scaledW)/2, -float64(scaledH)/2)
+	opts.GeoM.Rotate(cursorRotation * 3.14159265 / 180.0)
+	opts.GeoM.Translate(float64(scaledW)/2, float64(scaledH)/2)
+
+	opts.GeoM.Translate(float64(offsetX), float64(offsetY))
+
+	screen.DrawImage(tileImg, opts)
+}
+
+func (e *Editor) getTileImagePath(tile map[string]interface{}, coMap map[string]map[string]interface{}, fallbackName string) string {
+	var imagePath string
+
+	// First, try to get strImg from the tile itself (from JSON definition)
+	if strImg, ok := tile["strImg"].(string); ok && strImg != "" {
+		imagePath = strImg
+	}
+
+	// Then try to get strIMGPreview from the CO
+	if imagePath == "" {
+		if strID, ok := tile["strID"].(string); ok {
+			if co, ok := coMap[strID]; ok {
+				if strIMGPreview, ok := co["strIMGPreview"].(string); ok {
+					imagePath = strIMGPreview
+				}
+			}
+		}
+	}
+
+	// Fallback to provided name if no image path found
+	if imagePath == "" {
+		imagePath = fallbackName
+	}
+
+	return imagePath
 }

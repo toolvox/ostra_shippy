@@ -84,6 +84,21 @@ func parseShipData(rawData map[string]interface{}) (*models.Ship, error) {
 	return ship, nil
 }
 
+// LoadJSON loads any JSON file and returns the parsed data
+func LoadJSON(path string) (interface{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var result interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	return result, nil
+}
+
 // SaveShip saves a ship to a JSON file, preserving original JSON structure and order
 func SaveShip(path string, ship *models.Ship) error {
 	// Update raw data with current values
