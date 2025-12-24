@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"log"
 	"math/rand"
 
 	"github.com/ebitenui/ebitenui"
@@ -13,6 +14,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
+	"github.com/user/ostra_shippy/internal/config"
 	"github.com/user/ostra_shippy/internal/models"
 	"github.com/user/ostra_shippy/internal/renderer"
 	"github.com/user/ostra_shippy/internal/utils"
@@ -56,6 +58,23 @@ type Editor struct {
 	availableWallTiles   []map[string]interface{}
 	filteredWallTiles    []map[string]interface{}
 	layerChoiceContainer *widget.Container
+
+	// Undo/redo system
+	undoStack []EditorAction
+	redoStack []EditorAction
+
+	// Track last painted position to avoid duplicate undo actions
+	lastPaintedX     float64
+	lastPaintedY     float64
+	lastPaintedValid bool
+}
+
+// EditorAction represents a reversible action
+type EditorAction struct {
+	actionType string                 // "place", "delete", "rotate"
+	tileData   map[string]interface{} // snapshot of tile data
+	coData     map[string]interface{} // snapshot of CO data
+	index      int                    // position in aItems array
 }
 
 func NewEditor() (*Editor, error) {
@@ -210,6 +229,67 @@ func (e *Editor) Update() {
 		e.setStatus("Tile deselected")
 	}
 
+	// Handle Ctrl+Z for undo
+	if inpututil.IsKeyJustPressed(ebiten.KeyZ) && (ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)) {
+		if ebiten.IsKeyPressed(ebiten.KeyShift) {
+			// Ctrl+Shift+Z = Redo
+			e.redo()
+		} else {
+			// Ctrl+Z = Undo
+			e.undo()
+		}
+	}
+
+	// Handle C key to delete hovered tile
+	if inpututil.IsKeyJustPressed(ebiten.KeyC) && hoveredTile != nil {
+		e.deleteTileAt(hoveredTile)
+	}
+
+	// Handle R key to rotate - prioritize cursor tile if selected, otherwise rotate hovered tile
+	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+		if e.cursorTile != nil {
+			// Rotate the selected cursor tile
+			currentRotation := getFloatValue(e.cursorTile, "fRotation")
+			newRotation := currentRotation + 90.0
+			if newRotation >= 360.0 {
+				newRotation -= 360.0
+			}
+			e.cursorTile["fRotation"] = newRotation
+			e.setStatus(fmt.Sprintf("Rotated cursor tile to %.0f°", newRotation))
+		} else if hoveredTile != nil {
+			// Rotate the hovered tile in the ship
+			currentRotation := getFloatValue(hoveredTile, "fRotation")
+			newRotation := currentRotation + 90.0
+			if newRotation >= 360.0 {
+				newRotation -= 360.0
+			}
+
+			// Find tile index for undo
+			if e.currentShip != nil {
+				if aItems, ok := e.currentShip.RawData["aItems"].([]interface{}); ok {
+					hoveredID := getStringValue(hoveredTile, "strID")
+					for i, itemInterface := range aItems {
+						if item, ok := itemInterface.(map[string]interface{}); ok {
+							if getStringValue(item, "strID") == hoveredID {
+								// Record undo action before rotation
+								oldTileData := deepCopyMap(hoveredTile)
+								e.pushUndo(EditorAction{
+									actionType: "rotate",
+									tileData:   oldTileData,
+									index:      i,
+								})
+								break
+							}
+						}
+					}
+				}
+			}
+
+			hoveredTile["fRotation"] = newRotation
+			e.setStatus(fmt.Sprintf("Rotated tile to %.0f°", newRotation))
+		}
+	}
+
 	if hoveredTile != nil {
 		info := "strName: " + getStringValue(hoveredTile, "strName") + "\n"
 		info += "strID: " + getStringValue(hoveredTile, "strID") + "\n"
@@ -242,17 +322,6 @@ func (e *Editor) Update() {
 		}
 
 		e.tileInfoText.Label = info
-
-		// Handle R key to rotate tile
-		if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-			currentRotation := getFloatValue(hoveredTile, "fRotation")
-			newRotation := currentRotation + 90.0
-			if newRotation >= 360.0 {
-				newRotation -= 360.0
-			}
-			hoveredTile["fRotation"] = newRotation
-			e.setStatus(fmt.Sprintf("Rotated tile to %.0f°", newRotation))
-		}
 	} else {
 		e.tileInfoText.Label = "Hover over a tile..."
 	}
@@ -263,11 +332,21 @@ func (e *Editor) Update() {
 	// Handle tile placement: left-click or hovering while holding left button in paint mode
 	if e.cursorTile != nil {
 		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			// Reset last painted position when starting a new click
+			e.lastPaintedValid = false
 			e.placeTileAtMouse()
 		} else if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && hoveredTile != nil {
-			// Paint continuously while dragging in paint mode
+			// Paint continuously while dragging in paint mode (but not on the first frame)
 			e.placeTileAtMouse()
 		}
+	} else {
+		// Reset last painted position when no cursor tile is selected
+		e.lastPaintedValid = false
+	}
+
+	// Reset last painted position when mouse button is released
+	if !ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+		e.lastPaintedValid = false
 	}
 }
 
@@ -383,9 +462,10 @@ func (e *Editor) renderCursorTilePreview(screen *ebiten.Image) {
 	opts := &ebiten.DrawImageOptions{}
 	opts.GeoM.Scale(float64(scale), float64(scale))
 
-	// Apply rotation around center
+	// Apply rotation around center (use same calculation as floor tiles in renderer)
 	opts.GeoM.Translate(-float64(scaledW)/2, -float64(scaledH)/2)
-	opts.GeoM.Rotate(cursorRotation * 3.14159265 / 180.0)
+	theta := (360 - cursorRotation) * 3.14159265 / 180.0
+	opts.GeoM.Rotate(theta)
 	opts.GeoM.Translate(float64(scaledW)/2, float64(scaledH)/2)
 
 	opts.GeoM.Translate(float64(offsetX), float64(offsetY))
@@ -444,4 +524,227 @@ func (e *Editor) extractSpriteFromSheet(sheet *ebiten.Image, index int) *ebiten.
 	rect := image.Rect(x, y, x+spriteWidth, y+spriteHeight)
 	subImg := sheet.SubImage(rect).(*ebiten.Image)
 	return subImg
+}
+
+// deepCopyMap creates a deep copy of a map
+func deepCopyMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]interface{})
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// pushUndo adds an action to the undo stack
+func (e *Editor) pushUndo(action EditorAction) {
+	e.undoStack = append(e.undoStack, action)
+	// Clear redo stack when new action is performed
+	e.redoStack = nil
+
+	if config.Verbose {
+		log.Printf("UNDO: Pushed action '%s' to stack (stack size: %d)", action.actionType, len(e.undoStack))
+	}
+}
+
+// undo reverts the last action
+func (e *Editor) undo() {
+	if len(e.undoStack) == 0 {
+		e.setStatus("Nothing to undo")
+		return
+	}
+
+	// Pop action from undo stack
+	action := e.undoStack[len(e.undoStack)-1]
+	e.undoStack = e.undoStack[:len(e.undoStack)-1]
+
+	if config.Verbose {
+		log.Printf("UNDO: Popped action '%s' from stack (stack size: %d)", action.actionType, len(e.undoStack))
+	}
+
+	// Execute the undo
+	e.executeUndo(action)
+
+	// Push to redo stack
+	e.redoStack = append(e.redoStack, action)
+
+	e.setStatus(fmt.Sprintf("Undone: %s", action.actionType))
+}
+
+// redo re-applies the last undone action
+func (e *Editor) redo() {
+	if len(e.redoStack) == 0 {
+		e.setStatus("Nothing to redo")
+		return
+	}
+
+	// Pop action from redo stack
+	action := e.redoStack[len(e.redoStack)-1]
+	e.redoStack = e.redoStack[:len(e.redoStack)-1]
+
+	if config.Verbose {
+		log.Printf("REDO: Popped action '%s' from redo stack (redo stack size: %d)", action.actionType, len(e.redoStack))
+	}
+
+	// Execute the redo
+	e.executeRedo(action)
+
+	// Push back to undo stack
+	e.undoStack = append(e.undoStack, action)
+
+	if config.Verbose {
+		log.Printf("REDO: Pushed action '%s' back to undo stack (undo stack size: %d)", action.actionType, len(e.undoStack))
+	}
+
+	e.setStatus(fmt.Sprintf("Redone: %s", action.actionType))
+}
+
+// executeUndo reverts an action
+func (e *Editor) executeUndo(action EditorAction) {
+	if e.currentShip == nil {
+		return
+	}
+
+	aItems, ok := e.currentShip.RawData["aItems"].([]interface{})
+	if !ok {
+		return
+	}
+
+	aCOs, ok := e.currentShip.RawData["aCOs"].([]interface{})
+	if !ok {
+		return
+	}
+
+	switch action.actionType {
+	case "place":
+		// Undo a tile placement by restoring the old tile
+		if action.index >= 0 && action.index < len(aItems) {
+			// Get the current tile's ID (the new tile that was placed) before we restore the old one
+			var currentTileID string
+			if currentTile, ok := aItems[action.index].(map[string]interface{}); ok {
+				currentTileID = getStringValue(currentTile, "strID")
+			}
+
+			// Restore old tile data
+			aItems[action.index] = action.tileData
+			e.currentShip.RawData["aItems"] = aItems
+
+			// Restore old CO data - find CO by the CURRENT tile's ID, not the old one
+			if action.coData != nil && currentTileID != "" {
+				for i, coInterface := range aCOs {
+					if co, ok := coInterface.(map[string]interface{}); ok {
+						if strID, ok := co["strID"].(string); ok && strID == currentTileID {
+							aCOs[i] = action.coData
+							e.currentShip.RawData["aCOs"] = aCOs
+							break
+						}
+					}
+				}
+			}
+		}
+	case "delete":
+		// Restore the deleted tile
+		if action.tileData != nil {
+			// Re-insert tile at original index
+			aItems = append(aItems[:action.index], append([]interface{}{action.tileData}, aItems[action.index:]...)...)
+			e.currentShip.RawData["aItems"] = aItems
+
+			// Re-insert CO
+			if action.coData != nil {
+				aCOs = append(aCOs, action.coData)
+				e.currentShip.RawData["aCOs"] = aCOs
+			}
+		}
+	case "rotate":
+		// Restore old rotation
+		if action.index >= 0 && action.index < len(aItems) {
+			if tile, ok := aItems[action.index].(map[string]interface{}); ok {
+				oldRotation := getFloatValue(action.tileData, "fRotation")
+				tile["fRotation"] = oldRotation
+				// Write back to ensure changes are visible
+				e.currentShip.RawData["aItems"] = aItems
+			}
+		}
+	}
+}
+
+// executeRedo re-applies an action
+func (e *Editor) executeRedo(action EditorAction) {
+	if e.currentShip == nil {
+		return
+	}
+
+	aItems, ok := e.currentShip.RawData["aItems"].([]interface{})
+	if !ok {
+		return
+	}
+
+	aCOs, ok := e.currentShip.RawData["aCOs"].([]interface{})
+	if !ok {
+		return
+	}
+
+	switch action.actionType {
+	case "place":
+		// Re-place the tile (swap back to new data)
+		if action.index >= 0 && action.index < len(aItems) {
+			// Get the current state before redo
+			if tile, ok := aItems[action.index].(map[string]interface{}); ok {
+				// Swap: current becomes old, action.tileData becomes current
+				oldData := deepCopyMap(tile)
+				aItems[action.index] = action.tileData
+				action.tileData = oldData
+				e.currentShip.RawData["aItems"] = aItems
+
+				// Same for CO
+				newTileID := getStringValue(tile, "strID")
+				for i, coInterface := range aCOs {
+					if co, ok := coInterface.(map[string]interface{}); ok {
+						if strID, ok := co["strID"].(string); ok && strID == newTileID {
+							oldCO := deepCopyMap(co)
+							aCOs[i] = action.coData
+							action.coData = oldCO
+							e.currentShip.RawData["aCOs"] = aCOs
+							break
+						}
+					}
+				}
+			}
+		}
+	case "delete":
+		// Re-delete the tile
+		if action.index >= 0 && action.index < len(aItems) {
+			// Remove tile
+			aItems = append(aItems[:action.index], aItems[action.index+1:]...)
+			e.currentShip.RawData["aItems"] = aItems
+
+			// Remove CO
+			if action.coData != nil {
+				tileID := getStringValue(action.coData, "strID")
+				for i, coInterface := range aCOs {
+					if co, ok := coInterface.(map[string]interface{}); ok {
+						if strID, ok := co["strID"].(string); ok && strID == tileID {
+							aCOs = append(aCOs[:i], aCOs[i+1:]...)
+							e.currentShip.RawData["aCOs"] = aCOs
+							break
+						}
+					}
+				}
+			}
+		}
+	case "rotate":
+		// Re-apply rotation
+		if action.index >= 0 && action.index < len(aItems) {
+			if tile, ok := aItems[action.index].(map[string]interface{}); ok {
+				oldRotation := tile["fRotation"]
+				newRotation := getFloatValue(action.tileData, "fRotation")
+				tile["fRotation"] = newRotation
+				action.tileData["fRotation"] = oldRotation
+				// Write back to ensure changes are visible
+				e.currentShip.RawData["aItems"] = aItems
+			}
+		}
+	}
 }

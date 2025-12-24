@@ -424,6 +424,29 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 	mx, my := ebiten.CursorPosition()
 	r.hoveredTile = nil
 
+	// Calculate grid position from mouse even if not hovering over a tile
+	// This allows placement on empty adjacent cells
+	if float32(mx) >= x && float32(mx) < x+width && float32(my) >= y && float32(my) < y+height {
+		// Convert screen coords to world coords
+		screenX := float32(mx) - x - r.offsetX
+		screenY := float32(my) - y - r.offsetY
+
+		// Convert to grid position
+		gridWorldX := screenX / (tileSize * r.scale)
+		gridWorldY := -screenY / (tileSize * r.scale) // Flip Y
+
+		// Apply center offset
+		gridWorldX -= centerX
+		gridWorldY -= centerY
+
+		// Snap to grid
+		r.mouseGridX = math.Round(float64(gridWorldX))
+		r.mouseGridY = math.Round(float64(gridWorldY))
+		r.mouseInGrid = true
+	} else {
+		r.mouseInGrid = false
+	}
+
 	// Second pass: draw floors first
 	for _, itemInterface := range items {
 		item, ok := itemInterface.(map[string]interface{})
@@ -540,6 +563,32 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 		vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 1, borderColor, false)
 	}
 
+	// Check if strCODef matches strName
+	tileID := ""
+	if strID, ok := item["strID"].(string); ok {
+		tileID = strID
+	}
+
+	mismatchDetected := false
+	if tileID != "" {
+		if co, ok := coMap[tileID]; ok {
+			strCODef := ""
+			if coDefVal, ok := co["strCODef"].(string); ok {
+				strCODef = coDefVal
+			}
+			// If strCODef exists and doesn't match strName, mark as mismatched
+			if strCODef != "" && strCODef != itemName {
+				mismatchDetected = true
+			}
+		}
+	}
+
+	// Draw red transparent overlay if CO definition doesn't match tile name
+	if mismatchDetected {
+		redOverlay := color.NRGBA{255, 0, 0, 64}
+		vector.DrawFilledRect(clippedScreen, drawX, drawY, drawSize, drawSize, redOverlay, false)
+	}
+
 	// Highlight hovered tile
 	if isHovered {
 		highlightColor := color.NRGBA{255, 255, 0, 128}
@@ -596,10 +645,11 @@ func (r *ShipRenderer) renderCursorPreview(cursorTile map[string]interface{}, it
 			scaleY := drawSize / float32(imgH)
 			opts.GeoM.Scale(float64(scaleX), float64(scaleY))
 
-			// Apply rotation
+			// Apply rotation (use same calculation as floor tiles)
 			if cursorRotation != 0 {
 				opts.GeoM.Translate(-float64(drawSize)/2, -float64(drawSize)/2)
-				opts.GeoM.Rotate((cursorRotation + 0) * math.Pi / 180.0)
+				theta := (360 - cursorRotation) * math.Pi / 180.0
+				opts.GeoM.Rotate(theta)
 				opts.GeoM.Translate(float64(drawSize)/2, float64(drawSize)/2)
 			}
 
