@@ -3,7 +3,6 @@ package ui
 import (
 	"bytes"
 	"image/color"
-	"math"
 
 	ebitenui_image "github.com/ebitenui/ebitenui/image"
 	"github.com/ebitenui/ebitenui/widget"
@@ -147,19 +146,19 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 	)
 	panel.AddChild(layersLabel)
 
-	// Layer toggles container (floor and wall side by side)
+	// Layer toggles container (floor, wall, conduit, installable, and loose in a 3-column grid)
 	layerTogglesContainer := widget.NewContainer(
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
-			widget.GridLayoutOpts.Columns(2),
-			widget.GridLayoutOpts.Stretch([]bool{true, true}, []bool{true}),
-			widget.GridLayoutOpts.Spacing(5, 5),
+			widget.GridLayoutOpts.Columns(3),
+			widget.GridLayoutOpts.Stretch([]bool{true, true, true}, []bool{true, true}),
+			widget.GridLayoutOpts.Spacing(3, 3),
 		)),
 	)
 
 	// Floor layer toggle button
 	e.floorToggle = widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.MinSize(130, 25),
+			widget.WidgetOpts.MinSize(85, 25),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
 			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 150, 70, 255}),
@@ -179,7 +178,7 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 	// Wall layer toggle button
 	e.wallToggle = widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.MinSize(130, 25),
+			widget.WidgetOpts.MinSize(85, 25),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
 			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 100, 70, 255}),
@@ -195,6 +194,66 @@ func (e *Editor) createLeftControlPanel() *widget.Container {
 		}),
 	)
 	layerTogglesContainer.AddChild(e.wallToggle)
+
+	// Conduit layer toggle button
+	e.conduitToggle = widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(85, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{100, 100, 200, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{120, 120, 220, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{80, 80, 180, 255}),
+		}),
+		widget.ButtonOpts.Text("Cond: ON", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.toggleConduit()
+		}),
+	)
+	layerTogglesContainer.AddChild(e.conduitToggle)
+
+	// Installable items layer toggle button
+	e.installableToggle = widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(85, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{200, 150, 50, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{220, 170, 70, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{180, 130, 30, 255}),
+		}),
+		widget.ButtonOpts.Text("Install: ON", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.toggleInstallable()
+		}),
+	)
+	layerTogglesContainer.AddChild(e.installableToggle)
+
+	// Loose items layer toggle button
+	e.looseToggle = widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(85, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 200, 150, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{170, 220, 170, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{130, 180, 130, 255}),
+		}),
+		widget.ButtonOpts.Text("Loose: ON", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.toggleLoose()
+		}),
+	)
+	layerTogglesContainer.AddChild(e.looseToggle)
 
 	panel.AddChild(layerTogglesContainer)
 
@@ -302,18 +361,18 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 	)
 	panel.AddChild(paletteLabel)
 
-	// Layer choice buttons (Floor/Wall) - shown when both layers are visible
+	// Layer choice buttons (Floor/Wall/Conduit/Installable/Loose) - shown when multiple layers are visible
 	e.layerChoiceContainer = widget.NewContainer(
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
-			widget.GridLayoutOpts.Columns(2),
-			widget.GridLayoutOpts.Stretch([]bool{true, true}, []bool{true}),
-			widget.GridLayoutOpts.Spacing(5, 5),
+			widget.GridLayoutOpts.Columns(3),
+			widget.GridLayoutOpts.Stretch([]bool{true, true, true}, []bool{true, true}),
+			widget.GridLayoutOpts.Spacing(3, 3),
 		)),
 	)
 
 	floorChoiceBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.MinSize(105, 25),
+			widget.WidgetOpts.MinSize(68, 25),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
 			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 150, 70, 255}),
@@ -332,7 +391,7 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 
 	wallChoiceBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.MinSize(105, 25),
+			widget.WidgetOpts.MinSize(68, 25),
 		),
 		widget.ButtonOpts.Image(&widget.ButtonImage{
 			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 100, 70, 255}),
@@ -348,6 +407,63 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 		}),
 	)
 	e.layerChoiceContainer.AddChild(wallChoiceBtn)
+
+	conduitChoiceBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(68, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{100, 100, 200, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{120, 120, 220, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{80, 80, 180, 255}),
+		}),
+		widget.ButtonOpts.Text("Conduit", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.setCurrentLayer("conduit")
+		}),
+	)
+	e.layerChoiceContainer.AddChild(conduitChoiceBtn)
+
+	installableChoiceBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(68, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{200, 150, 50, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{220, 170, 70, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{180, 130, 30, 255}),
+		}),
+		widget.ButtonOpts.Text("Install", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.setCurrentLayer("installable")
+		}),
+	)
+	e.layerChoiceContainer.AddChild(installableChoiceBtn)
+
+	looseChoiceBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(68, 25),
+		),
+		widget.ButtonOpts.Image(&widget.ButtonImage{
+			Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{150, 200, 150, 255}),
+			Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{170, 220, 170, 255}),
+			Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{130, 180, 130, 255}),
+		}),
+		widget.ButtonOpts.Text("Loose", smallFontFace, &widget.ButtonTextColor{
+			Idle: color.NRGBA{255, 255, 255, 255},
+		}),
+		widget.ButtonOpts.TextPadding(widget.NewInsetsSimple(3)),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			e.setCurrentLayer("loose")
+		}),
+	)
+	e.layerChoiceContainer.AddChild(looseChoiceBtn)
 
 	panel.AddChild(e.layerChoiceContainer)
 
@@ -378,14 +494,14 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 	// Content container for tiles - use GridLayout for 5 columns of tiles
 	e.tilePaletteContainer = widget.NewContainer(
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
-			widget.GridLayoutOpts.Columns(5),
+			widget.GridLayoutOpts.Columns(3),
 			widget.GridLayoutOpts.Spacing(2, 2),
 			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(5)),
 		)),
 	)
 
 	// Container to hold scroll container + slider in 2 columns
-	scrollWrapper := widget.NewContainer(
+	e.tilePaletteScrollWrapper = widget.NewContainer(
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(2),
 			widget.GridLayoutOpts.Stretch([]bool{true, false}, []bool{true}),
@@ -393,52 +509,10 @@ func (e *Editor) createRightTilePanel() *widget.Container {
 		)),
 	)
 
-	// ScrollContainer
-	scrollContainer := widget.NewScrollContainer(
-		widget.ScrollContainerOpts.Content(e.tilePaletteContainer),
-		widget.ScrollContainerOpts.StretchContentWidth(),
-		widget.ScrollContainerOpts.Image(&widget.ScrollContainerImage{
-			Idle: ebitenui_image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
-			Mask: ebitenui_image.NewNineSliceColor(color.NRGBA{25, 25, 35, 255}),
-		}),
-	)
-	scrollWrapper.AddChild(scrollContainer)
+	// Build initial scroll content (7 columns for floor layer)
+	e.buildPaletteScrollContent(7)
 
-	// Page size function for slider
-	pageSizeFunc := func() int {
-		return int(math.Round(float64(scrollContainer.ViewRect().Dy())/float64(e.tilePaletteContainer.GetWidget().Rect.Dy())*1000) / 3)
-	}
-
-	// Vertical slider for scrolling
-	vSlider := widget.NewSlider(
-		widget.SliderOpts.Direction(widget.DirectionVertical),
-		widget.SliderOpts.MinMax(0, 1000),
-		widget.SliderOpts.PageSizeFunc(pageSizeFunc),
-		widget.SliderOpts.ChangedHandler(func(args *widget.SliderChangedEventArgs) {
-			scrollContainer.ScrollTop = float64(args.Slider.Current) / 1000
-		}),
-		widget.SliderOpts.Images(
-			&widget.SliderTrackImage{
-				Idle:  ebitenui_image.NewNineSliceColor(color.NRGBA{40, 40, 50, 255}),
-				Hover: ebitenui_image.NewNineSliceColor(color.NRGBA{50, 50, 60, 255}),
-			},
-			&widget.ButtonImage{
-				Idle:    ebitenui_image.NewNineSliceColor(color.NRGBA{70, 70, 80, 255}),
-				Hover:   ebitenui_image.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
-				Pressed: ebitenui_image.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
-			},
-		),
-	)
-
-	// Sync slider with scroll events
-	scrollContainer.GetWidget().ScrolledEvent.AddHandler(func(args interface{}) {
-		if a, ok := args.(*widget.WidgetScrolledEventArgs); ok {
-			vSlider.Current -= int(math.Round(a.Y * float64(pageSizeFunc())))
-		}
-	})
-
-	scrollWrapper.AddChild(vSlider)
-	panel.AddChild(scrollWrapper)
+	panel.AddChild(e.tilePaletteScrollWrapper)
 
 	// Instructions
 	instructionsText := widget.NewText(

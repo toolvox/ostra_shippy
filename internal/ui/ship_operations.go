@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 
 	"github.com/sqweek/dialog"
 	"github.com/user/ostra_shippy/internal/config"
@@ -87,27 +88,23 @@ func (e *Editor) removeDuplicateTiles() {
 	// Track tiles by position and layer (x,y,layer) -> list of tile indices
 	type posKey struct {
 		x, y  float64
-		layer string // "floor" or "wall"
+		layer string // "floor", "wall", "conduit", "installable", or "loose"
 	}
 	positionMap := make(map[posKey][]int)
 
-	// Build map of positions to tile indices (floor and wall tiles)
+	// Build map of positions to tile indices (floor, wall, conduit, installable, and loose items)
 	for i, itemInterface := range aItems {
 		if item, ok := itemInterface.(map[string]interface{}); ok {
 			strName := utils.GetStringValue(item, "strName")
 
-			// Determine layer
-			var layer string
-			if len(strName) >= 8 && strName[:8] == "ItmFloor" {
-				layer = "floor"
-			} else if len(strName) >= 7 && strName[:7] == "ItmWall" {
-				layer = "wall"
-			} else {
+			// Determine layer using the getTileLayer helper
+			layer := getTileLayer(strName)
+			if layer == "unknown" {
 				continue
 			}
 
-			// Skip loose items (they can stack)
-			if len(strName) > 5 && strName[len(strName)-5:] == "Loose" {
+			// Installable and loose items can stack at the same position - skip duplicate removal for them
+			if layer == "installable" || layer == "loose" {
 				continue
 			}
 
@@ -205,19 +202,34 @@ func (e *Editor) placeTileAtMouse() {
 	hoveredTile := e.renderer.GetHoveredTile()
 
 	if hoveredTile != nil {
-		// Replacing existing tile
+		// Check if hovered tile and cursor tile are the same layer type
+		hoveredName := utils.GetStringValue(hoveredTile, "strName")
+		cursorName := utils.GetStringValue(e.cursorTile, "strName")
+
+		hoveredLayer := getTileLayer(hoveredName)
+		cursorLayer := getTileLayer(cursorName)
+
 		if config.Verbose {
 			hoveredX := utils.GetFloatValue(hoveredTile, "fX")
 			hoveredY := utils.GetFloatValue(hoveredTile, "fY")
-			hoveredName := utils.GetStringValue(hoveredTile, "strName")
 			hoveredID := utils.GetStringValue(hoveredTile, "strID")
-			log.Printf("Hovered tile: %s (ID: %s) at (%.0f, %.0f)", hoveredName, hoveredID, hoveredX, hoveredY)
+			log.Printf("Hovered tile: %s (ID: %s, layer: %s) at (%.0f, %.0f)", hoveredName, hoveredID, hoveredLayer, hoveredX, hoveredY)
+			log.Printf("Cursor tile: %s (layer: %s)", cursorName, cursorLayer)
 			log.Printf("Cursor grid position: (%.0f, %.0f)", gridX, gridY)
 		}
 
-		// Replace the specific hovered tile (use its ID to ensure we replace the right one)
-		hoveredTileID := utils.GetStringValue(hoveredTile, "strID")
-		e.replaceTileAt(gridX, gridY, hoveredTileID)
+		// Only replace if same layer type
+		if hoveredLayer == cursorLayer {
+			// Replace the specific hovered tile (use its ID to ensure we replace the right one)
+			hoveredTileID := utils.GetStringValue(hoveredTile, "strID")
+			e.replaceTileAt(gridX, gridY, hoveredTileID)
+		} else {
+			// Different layers - place new tile without removing the hovered one
+			if config.Verbose {
+				log.Printf("Hovered tile layer (%s) differs from cursor layer (%s), placing new tile", hoveredLayer, cursorLayer)
+			}
+			e.placeNewTileAt(gridX, gridY)
+		}
 	} else {
 		// Placing on empty space
 		if config.Verbose {
@@ -225,6 +237,23 @@ func (e *Editor) placeTileAtMouse() {
 		}
 		e.placeNewTileAt(gridX, gridY)
 	}
+}
+
+// getTileLayer determines the layer type of a tile based on its name
+func getTileLayer(tileName string) string {
+	if strings.HasSuffix(tileName, "Loose") {
+		return "loose"
+	}
+	if len(tileName) >= 8 && tileName[:8] == "ItmFloor" {
+		return "floor"
+	} else if len(tileName) >= 7 && tileName[:7] == "ItmWall" {
+		return "wall"
+	} else if len(tileName) >= 10 && tileName[:10] == "ItmConduit" {
+		return "conduit"
+	} else if strings.HasPrefix(tileName, "Itm") {
+		return "installable"
+	}
+	return "unknown"
 }
 
 func (e *Editor) placeNewTileAt(tileX, tileY float64) {
@@ -335,15 +364,32 @@ func (e *Editor) placeNewTileAt(tileX, tileY float64) {
 	} else {
 		// Cursor tile is from palette, use the stored CO definition from JSON
 		if coDefinition, ok := e.cursorTile["_coDefinition"].(map[string]interface{}); ok {
-			// Update from palette definition
+			// Copy all relevant fields from the palette CO definition
 			if strCODef, ok := coDefinition["strName"].(string); ok {
 				newCO["strCODef"] = strCODef
 			}
 			if strImg, ok := coDefinition["strImg"].(string); ok {
 				newCO["strIMGPreview"] = strImg
 			}
+			// Copy size information for multi-tile items
+			if fSizeX, ok := coDefinition["fSizeX"].(float64); ok {
+				newCO["fSizeX"] = fSizeX
+			}
+			if fSizeY, ok := coDefinition["fSizeY"].(float64); ok {
+				newCO["fSizeY"] = fSizeY
+			}
+			// Copy other useful CO fields
+			if strCOBase, ok := coDefinition["strCOBase"].(string); ok {
+				newCO["strCOBase"] = strCOBase
+			}
+			if strNameFriendly, ok := coDefinition["strNameFriendly"].(string); ok {
+				newCO["strNameFriendly"] = strNameFriendly
+			}
 			if config.Verbose {
-				log.Printf("Created new CO from palette: strCODef=%s", utils.GetStringValue(newCO, "strCODef"))
+				log.Printf("Created new CO from palette: strCODef=%s, fSizeX=%.1f, fSizeY=%.1f",
+					utils.GetStringValue(newCO, "strCODef"),
+					utils.GetFloatValue(newCO, "fSizeX"),
+					utils.GetFloatValue(newCO, "fSizeY"))
 			}
 		} else {
 			// Fallback: just set image
@@ -356,16 +402,8 @@ func (e *Editor) placeNewTileAt(tileX, tileY float64) {
 		}
 	}
 
-	// No undo action needed for new placement (nothing to undo to)
-	// Actually, we should record an undo action for deletion
-	e.pushUndo(EditorAction{
-		actionType: "delete",
-		tileData:   nil,         // Will be filled with the new tile after placement
-		coData:     nil,         // Will be filled with the new CO after placement
-		index:      len(aItems), // Position where tile will be added
-	})
-
 	// Add tile to aItems
+	newItemIndex := len(aItems)
 	aItems = append(aItems, newTile)
 	e.currentShip.RawData["aItems"] = aItems
 
@@ -373,12 +411,13 @@ func (e *Editor) placeNewTileAt(tileX, tileY float64) {
 	aCOs = append(aCOs, newCO)
 	e.currentShip.RawData["aCOs"] = aCOs
 
-	// Update the undo action with actual data
-	if len(e.undoStack) > 0 {
-		lastAction := &e.undoStack[len(e.undoStack)-1]
-		lastAction.tileData = newTile
-		lastAction.coData = newCO
-	}
+	// Record undo action for new tile placement (to undo, we delete it)
+	e.pushUndo(EditorAction{
+		actionType: "delete",
+		tileData:   deepCopyMap(newTile),
+		coData:     deepCopyMap(newCO),
+		index:      newItemIndex,
+	})
 
 	e.setStatus(fmt.Sprintf("Placed new tile at (%.0f, %.0f)", tileX, tileY))
 	if config.Verbose {

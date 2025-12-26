@@ -29,35 +29,49 @@ type Editor struct {
 	renderer    *renderer.ShipRenderer
 
 	// UI widgets
-	nameInput    *widget.TextInput
-	regIDInput   *widget.TextInput
-	statusText   *widget.Text
-	filePathText *widget.Text
-	loadButton   *widget.Button
-	floorToggle  *widget.Button
-	wallToggle   *widget.Button
-	showFloor    bool
-	showWall     bool
-	tileInfoText *widget.Text
-	rKeyPressed  bool
-	currentLayer string // "floor" or "wall"
+	nameInput         *widget.TextInput
+	regIDInput        *widget.TextInput
+	statusText        *widget.Text
+	filePathText      *widget.Text
+	loadButton        *widget.Button
+	floorToggle       *widget.Button
+	wallToggle        *widget.Button
+	conduitToggle     *widget.Button
+	installableToggle *widget.Button
+	looseToggle       *widget.Button
+	showFloor         bool
+	showWall          bool
+	showConduit       bool
+	showInstallable   bool
+	showLoose         bool
+	tileInfoText      *widget.Text
+	rKeyPressed       bool
+	currentLayer      string // "floor", "wall", "conduit", "installable", or "loose"
 
 	// Cursor tile for placement
-	cursorTile           map[string]interface{}
-	cursorTileText       *widget.Text
-	cursorTilePreview    *widget.Container
-	tilePaletteContainer *widget.Container
-	tileSearchInput      *widget.TextInput
-	availableTiles       []map[string]interface{}
-	filteredTiles        []map[string]interface{}
-	smallFontFace        *text.Face
+	cursorTile               map[string]interface{}
+	cursorTileText           *widget.Text
+	cursorTilePreview        *widget.Container
+	tilePaletteContainer     *widget.Container
+	tilePaletteScrollWrapper *widget.Container
+	tileSearchInput          *widget.TextInput
+	availableTiles           []map[string]interface{}
+	filteredTiles            []map[string]interface{}
+	smallFontFace            *text.Face
 
 	// Tile palette rendering
-	paletteScrollY       int
-	paletteMaxScroll     int
-	availableWallTiles   []map[string]interface{}
-	filteredWallTiles    []map[string]interface{}
-	layerChoiceContainer *widget.Container
+	paletteScrollY            int
+	paletteMaxScroll          int
+	paletteCurrentColumns     int // Track current column count to detect changes
+	availableWallTiles        []map[string]interface{}
+	filteredWallTiles         []map[string]interface{}
+	availableConduitTiles     []map[string]interface{}
+	filteredConduitTiles      []map[string]interface{}
+	availableInstallableTiles []map[string]interface{}
+	filteredInstallableTiles  []map[string]interface{}
+	availableLooseTiles       []map[string]interface{}
+	filteredLooseTiles        []map[string]interface{}
+	layerChoiceContainer      *widget.Container
 
 	// Undo/redo system
 	undoStack []EditorAction
@@ -79,10 +93,14 @@ type EditorAction struct {
 
 func NewEditor() (*Editor, error) {
 	e := &Editor{
-		renderer:     renderer.NewShipRenderer(),
-		showFloor:    true,
-		showWall:     true,
-		currentLayer: "floor",
+		renderer:              renderer.NewShipRenderer(),
+		showFloor:             true,
+		showWall:              true,
+		showConduit:           true,
+		showInstallable:       true,
+		showLoose:             true,
+		currentLayer:          "floor",
+		paletteCurrentColumns: 7, // Start with 7 columns for floor
 	}
 
 	// Load font
@@ -100,6 +118,9 @@ func NewEditor() (*Editor, error) {
 	// Build tile palettes at startup
 	e.buildFloorPalette()
 	e.buildWallPalette()
+	e.buildConduitPalette()
+	e.buildInstallablePalette()
+	e.buildLoosePalette()
 
 	// Create UI
 	e.createUI()
@@ -171,9 +192,97 @@ func (e *Editor) toggleWall() {
 		e.wallToggle.Text().Label = "Wall: ON"
 	} else {
 		e.wallToggle.Text().Label = "Wall: OFF"
-		// If wall is turned off and current layer is wall, switch to floor
-		if e.currentLayer == "wall" && e.showFloor {
-			e.setCurrentLayer("floor")
+		// If wall is turned off and current layer is wall, switch to another visible layer
+		if e.currentLayer == "wall" {
+			if e.showFloor {
+				e.setCurrentLayer("floor")
+			} else if e.showConduit {
+				e.setCurrentLayer("conduit")
+			}
+		}
+	}
+
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) toggleConduit() {
+	e.showConduit = !e.showConduit
+	e.renderer.SetShowConduit(e.showConduit)
+
+	// Update button text
+	if e.showConduit {
+		e.conduitToggle.Text().Label = "Conduit: ON"
+	} else {
+		e.conduitToggle.Text().Label = "Conduit: OFF"
+		// If conduit is turned off and current layer is conduit, switch to another visible layer
+		if e.currentLayer == "conduit" {
+			if e.showFloor {
+				e.setCurrentLayer("floor")
+			} else if e.showWall {
+				e.setCurrentLayer("wall")
+			} else if e.showInstallable {
+				e.setCurrentLayer("installable")
+			} else if e.showLoose {
+				e.setCurrentLayer("loose")
+			}
+		}
+	}
+
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) toggleInstallable() {
+	e.showInstallable = !e.showInstallable
+	e.renderer.SetShowInstallable(e.showInstallable)
+
+	// Update button text
+	if e.showInstallable {
+		e.installableToggle.Text().Label = "Install: ON"
+	} else {
+		e.installableToggle.Text().Label = "Install: OFF"
+		// If installable is turned off and current layer is installable, switch to another visible layer
+		if e.currentLayer == "installable" {
+			if e.showFloor {
+				e.setCurrentLayer("floor")
+			} else if e.showWall {
+				e.setCurrentLayer("wall")
+			} else if e.showConduit {
+				e.setCurrentLayer("conduit")
+			} else if e.showLoose {
+				e.setCurrentLayer("loose")
+			}
+		}
+	}
+
+	// Update layer choice visibility
+	e.updateLayerChoiceVisibility()
+	e.rebuildTilePaletteUI()
+}
+
+func (e *Editor) toggleLoose() {
+	e.showLoose = !e.showLoose
+	e.renderer.SetShowLoose(e.showLoose)
+
+	// Update button text
+	if e.showLoose {
+		e.looseToggle.Text().Label = "Loose: ON"
+	} else {
+		e.looseToggle.Text().Label = "Loose: OFF"
+		// If loose is turned off and current layer is loose, switch to another visible layer
+		if e.currentLayer == "loose" {
+			if e.showFloor {
+				e.setCurrentLayer("floor")
+			} else if e.showWall {
+				e.setCurrentLayer("wall")
+			} else if e.showConduit {
+				e.setCurrentLayer("conduit")
+			} else if e.showInstallable {
+				e.setCurrentLayer("installable")
+			}
 		}
 	}
 
@@ -193,16 +302,40 @@ func (e *Editor) updateLayerChoiceVisibility() {
 		return
 	}
 
-	// Show layer choice buttons only when both layers are visible
-	if e.showFloor && e.showWall {
+	// Count visible layers
+	visibleCount := 0
+	if e.showFloor {
+		visibleCount++
+	}
+	if e.showWall {
+		visibleCount++
+	}
+	if e.showConduit {
+		visibleCount++
+	}
+	if e.showInstallable {
+		visibleCount++
+	}
+	if e.showLoose {
+		visibleCount++
+	}
+
+	// Show layer choice buttons only when multiple layers are visible
+	if visibleCount > 1 {
 		e.layerChoiceContainer.GetWidget().Visibility = widget.Visibility_Show
 	} else {
 		e.layerChoiceContainer.GetWidget().Visibility = widget.Visibility_Hide
-		// Auto-select the visible layer
-		if e.showFloor && !e.showWall {
+		// Auto-select the only visible layer
+		if e.showFloor {
 			e.currentLayer = "floor"
-		} else if e.showWall && !e.showFloor {
+		} else if e.showWall {
 			e.currentLayer = "wall"
+		} else if e.showConduit {
+			e.currentLayer = "conduit"
+		} else if e.showInstallable {
+			e.currentLayer = "installable"
+		} else if e.showLoose {
+			e.currentLayer = "loose"
 		}
 	}
 }
@@ -312,7 +445,14 @@ func (e *Editor) Update() {
 								info += "strCODef: " + strCODef + "\n"
 							}
 							if strCOBase := getStringValue(co, "strCOBase"); strCOBase != "" {
-								info += "strCOBase: " + strCOBase
+								info += "strCOBase: " + strCOBase + "\n"
+							}
+							// Add size information
+							fSizeX := getFloatValue(co, "fSizeX")
+							fSizeY := getFloatValue(co, "fSizeY")
+							if fSizeX != 0 || fSizeY != 0 {
+								info += fmt.Sprintf("fSizeX: %.1f\n", fSizeX)
+								info += fmt.Sprintf("fSizeY: %.1f", fSizeY)
 							}
 							break
 						}
@@ -367,7 +507,23 @@ func (e *Editor) updateCursorTileDisplay() {
 
 	info := "strName: " + getStringValue(e.cursorTile, "strName") + "\n"
 	info += "strID: " + getStringValue(e.cursorTile, "strID") + "\n"
-	info += fmt.Sprintf("Rotation: %.0f°", getFloatValue(e.cursorTile, "fRotation"))
+	info += fmt.Sprintf("Rotation: %.0f°\n", getFloatValue(e.cursorTile, "fRotation"))
+
+	// Try to get size information from CO definition
+	if coDef, ok := e.cursorTile["_coDefinition"].(map[string]interface{}); ok {
+		sizeX := 1.0
+		sizeY := 1.0
+		if fSizeX, ok := coDef["fSizeX"].(float64); ok {
+			sizeX = fSizeX
+		}
+		if fSizeY, ok := coDef["fSizeY"].(float64); ok {
+			sizeY = fSizeY
+		}
+		if sizeX != 1.0 || sizeY != 1.0 {
+			info += fmt.Sprintf("Size: %.1fx%.1f", sizeX, sizeY)
+		}
+	}
+
 	e.cursorTileText.Label = info
 }
 
@@ -426,9 +582,10 @@ func (e *Editor) renderCursorTilePreview(screen *ebiten.Image) {
 		return
 	}
 
-	// For walls, extract sprite at index 13 for preview
+	// For walls and conduits, extract sprite at index 13 for preview
 	isWall := len(cursorName) >= 7 && cursorName[:7] == "ItmWall"
-	if isWall {
+	isConduit := len(cursorName) >= 10 && cursorName[:10] == "ItmConduit"
+	if isWall || isConduit {
 		tileImg = e.extractSpriteFromSheet(tileImg, 13)
 		if tileImg == nil {
 			return
@@ -627,6 +784,10 @@ func (e *Editor) executeUndo(action EditorAction) {
 				currentTileID = getStringValue(currentTile, "strID")
 			}
 
+			if config.Verbose {
+				log.Printf("UNDO place: Restoring old tile at index %d (current ID: %s)", action.index, currentTileID)
+			}
+
 			// Restore old tile data
 			aItems[action.index] = action.tileData
 			e.currentShip.RawData["aItems"] = aItems
@@ -638,6 +799,9 @@ func (e *Editor) executeUndo(action EditorAction) {
 						if strID, ok := co["strID"].(string); ok && strID == currentTileID {
 							aCOs[i] = action.coData
 							e.currentShip.RawData["aCOs"] = aCOs
+							if config.Verbose {
+								log.Printf("UNDO place: Restored old CO at index %d", i)
+							}
 							break
 						}
 					}
@@ -645,16 +809,35 @@ func (e *Editor) executeUndo(action EditorAction) {
 			}
 		}
 	case "delete":
-		// Restore the deleted tile
+		// Delete the tile that was placed (undo a new tile placement)
 		if action.tileData != nil {
-			// Re-insert tile at original index
-			aItems = append(aItems[:action.index], append([]interface{}{action.tileData}, aItems[action.index:]...)...)
-			e.currentShip.RawData["aItems"] = aItems
+			tileID := getStringValue(action.tileData, "strID")
 
-			// Re-insert CO
-			if action.coData != nil {
-				aCOs = append(aCOs, action.coData)
-				e.currentShip.RawData["aCOs"] = aCOs
+			if config.Verbose {
+				tileName := getStringValue(action.tileData, "strName")
+				log.Printf("UNDO delete: Removing tile %s (ID: %s) at index %d", tileName, tileID, action.index)
+			}
+
+			// Remove tile from aItems at the recorded index
+			if action.index >= 0 && action.index < len(aItems) {
+				aItems = append(aItems[:action.index], aItems[action.index+1:]...)
+				e.currentShip.RawData["aItems"] = aItems
+			}
+
+			// Remove corresponding CO
+			if tileID != "" {
+				for i, coInterface := range aCOs {
+					if co, ok := coInterface.(map[string]interface{}); ok {
+						if strID, ok := co["strID"].(string); ok && strID == tileID {
+							aCOs = append(aCOs[:i], aCOs[i+1:]...)
+							e.currentShip.RawData["aCOs"] = aCOs
+							if config.Verbose {
+								log.Printf("UNDO delete: Removed CO at index %d", i)
+							}
+							break
+						}
+					}
+				}
 			}
 		}
 	case "rotate":
@@ -665,6 +848,10 @@ func (e *Editor) executeUndo(action EditorAction) {
 				tile["fRotation"] = oldRotation
 				// Write back to ensure changes are visible
 				e.currentShip.RawData["aItems"] = aItems
+
+				if config.Verbose {
+					log.Printf("UNDO rotate: Restored rotation to %.0f° at index %d", oldRotation, action.index)
+				}
 			}
 		}
 	}
@@ -698,6 +885,10 @@ func (e *Editor) executeRedo(action EditorAction) {
 				action.tileData = oldData
 				e.currentShip.RawData["aItems"] = aItems
 
+				if config.Verbose {
+					log.Printf("REDO place: Swapped tile data at index %d", action.index)
+				}
+
 				// Same for CO
 				newTileID := getStringValue(tile, "strID")
 				for i, coInterface := range aCOs {
@@ -707,6 +898,9 @@ func (e *Editor) executeRedo(action EditorAction) {
 							aCOs[i] = action.coData
 							action.coData = oldCO
 							e.currentShip.RawData["aCOs"] = aCOs
+							if config.Verbose {
+								log.Printf("REDO place: Swapped CO data at index %d", i)
+							}
 							break
 						}
 					}
@@ -714,23 +908,25 @@ func (e *Editor) executeRedo(action EditorAction) {
 			}
 		}
 	case "delete":
-		// Re-delete the tile
-		if action.index >= 0 && action.index < len(aItems) {
-			// Remove tile
-			aItems = append(aItems[:action.index], aItems[action.index+1:]...)
+		// Re-add the tile that was removed during undo (redo a new tile placement)
+		if action.tileData != nil {
+			tileID := getStringValue(action.tileData, "strID")
+
+			if config.Verbose {
+				tileName := getStringValue(action.tileData, "strName")
+				log.Printf("REDO delete: Re-adding tile %s (ID: %s) at index %d", tileName, tileID, action.index)
+			}
+
+			// Re-insert tile at original index
+			aItems = append(aItems[:action.index], append([]interface{}{action.tileData}, aItems[action.index:]...)...)
 			e.currentShip.RawData["aItems"] = aItems
 
-			// Remove CO
+			// Re-insert CO
 			if action.coData != nil {
-				tileID := getStringValue(action.coData, "strID")
-				for i, coInterface := range aCOs {
-					if co, ok := coInterface.(map[string]interface{}); ok {
-						if strID, ok := co["strID"].(string); ok && strID == tileID {
-							aCOs = append(aCOs[:i], aCOs[i+1:]...)
-							e.currentShip.RawData["aCOs"] = aCOs
-							break
-						}
-					}
+				aCOs = append(aCOs, action.coData)
+				e.currentShip.RawData["aCOs"] = aCOs
+				if config.Verbose {
+					log.Printf("REDO delete: Re-added CO")
 				}
 			}
 		}
@@ -744,6 +940,10 @@ func (e *Editor) executeRedo(action EditorAction) {
 				action.tileData["fRotation"] = oldRotation
 				// Write back to ensure changes are visible
 				e.currentShip.RawData["aItems"] = aItems
+
+				if config.Verbose {
+					log.Printf("REDO rotate: Rotated to %.0f° at index %d", newRotation, action.index)
+				}
 			}
 		}
 	}

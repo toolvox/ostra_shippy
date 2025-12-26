@@ -24,20 +24,23 @@ const (
 )
 
 type ShipRenderer struct {
-	offsetX     float32
-	offsetY     float32
-	scale       float32
-	isDragging  bool
-	lastMouseX  int
-	lastMouseY  int
-	showFloor   bool
-	showWall    bool
-	tileImages  map[string]*ebiten.Image
-	viewportX   float32
-	viewportY   float32
-	viewportW   float32
-	viewportH   float32
-	hoveredTile map[string]interface{}
+	offsetX         float32
+	offsetY         float32
+	scale           float32
+	isDragging      bool
+	lastMouseX      int
+	lastMouseY      int
+	showFloor       bool
+	showWall        bool
+	showConduit     bool
+	showInstallable bool
+	showLoose       bool
+	tileImages      map[string]*ebiten.Image
+	viewportX       float32
+	viewportY       float32
+	viewportW       float32
+	viewportH       float32
+	hoveredTile     map[string]interface{}
 
 	// Current mouse grid position (updated during render)
 	mouseGridX  float64
@@ -50,12 +53,15 @@ type ShipRenderer struct {
 
 func NewShipRenderer() *ShipRenderer {
 	return &ShipRenderer{
-		offsetX:    250,
-		offsetY:    250,
-		scale:      1.0,
-		showFloor:  true,
-		showWall:   true,
-		tileImages: make(map[string]*ebiten.Image),
+		offsetX:         250,
+		offsetY:         250,
+		scale:           1.0,
+		showFloor:       true,
+		showWall:        true,
+		showConduit:     true,
+		showInstallable: true,
+		showLoose:       true,
+		tileImages:      make(map[string]*ebiten.Image),
 	}
 }
 
@@ -339,7 +345,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 		return
 	}
 
-	if !r.showFloor && !r.showWall {
+	if !r.showFloor && !r.showWall && !r.showConduit && !r.showInstallable && !r.showLoose {
 		return
 	}
 
@@ -369,7 +375,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 	var minX, minY, maxX, maxY float64
 	firstTile := true
 
-	// First pass: find bounds (from both floor and wall tiles)
+	// First pass: find bounds (from floor, wall, and conduit tiles)
 	for _, itemInterface := range items {
 		item, ok := itemInterface.(map[string]interface{})
 		if !ok {
@@ -381,11 +387,13 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 			continue
 		}
 
-		// Check if this is a floor or wall tile (exclude Loose items)
+		// Check if this is a floor, wall, conduit, or installed item (exclude Loose items)
 		isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor" && !strings.HasSuffix(itemName, "Loose")
 		isWall := len(itemName) >= 7 && itemName[:7] == "ItmWall" && !strings.HasSuffix(itemName, "Loose")
+		isConduit := len(itemName) >= 10 && itemName[:10] == "ItmConduit" && !strings.HasSuffix(itemName, "Loose")
+		isInstalled := strings.HasPrefix(itemName, "Itm") && !isFloor && !isWall && !isConduit && !strings.HasSuffix(itemName, "Loose")
 
-		if !isFloor && !isWall {
+		if !isFloor && !isWall && !isConduit && !isInstalled {
 			continue
 		}
 
@@ -467,7 +475,7 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, false)
 	}
 
-	// Third pass: draw walls on top
+	// Third pass: draw walls on top of floors
 	for _, itemInterface := range items {
 		item, ok := itemInterface.(map[string]interface{})
 		if !ok {
@@ -485,6 +493,86 @@ func (r *ShipRenderer) Render(screen *ebiten.Image, ship *models.Ship, x, y, wid
 		}
 
 		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, true)
+	}
+
+	// Fourth pass: draw conduits on top of walls
+	for _, itemInterface := range items {
+		item, ok := itemInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemName, ok := item["strName"].(string)
+		if !ok {
+			continue
+		}
+
+		isConduit := len(itemName) >= 10 && itemName[:10] == "ItmConduit" && !strings.HasSuffix(itemName, "Loose")
+		if !isConduit || !r.showConduit {
+			continue
+		}
+
+		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, true)
+	}
+
+	// Fifth pass: draw installable items on top of conduits
+	for _, itemInterface := range items {
+		item, ok := itemInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemName, ok := item["strName"].(string)
+		if !ok {
+			continue
+		}
+
+		// Installable items are Itm* that are not Floor, Wall, Conduit, or Loose
+		isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor"
+		isWall := len(itemName) >= 7 && itemName[:7] == "ItmWall"
+		isConduit := len(itemName) >= 10 && itemName[:10] == "ItmConduit"
+		isInstallable := strings.HasPrefix(itemName, "Itm") && !isFloor && !isWall && !isConduit && !strings.HasSuffix(itemName, "Loose")
+
+		if !isInstallable || !r.showInstallable {
+			continue
+		}
+
+		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, false)
+	}
+
+	// Sixth pass: draw loose items on top of installables
+	for _, itemInterface := range items {
+		item, ok := itemInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemName, ok := item["strName"].(string)
+		if !ok {
+			continue
+		}
+
+		// Loose items are either regular Itm* items OR any item with "Loose" suffix
+		isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor"
+		isWall := len(itemName) >= 7 && itemName[:7] == "ItmWall"
+		isConduit := len(itemName) >= 10 && itemName[:10] == "ItmConduit"
+		hasLooseSuffix := strings.HasSuffix(itemName, "Loose")
+
+		// Loose items: either has Loose suffix, OR is a regular Itm* item (not Floor/Wall/Conduit and not installable-type)
+		// For now, treat all non-Floor/Wall/Conduit Itm* items that aren't explicitly installable as loose
+		isLoose := (strings.HasPrefix(itemName, "Itm") && !isFloor && !isWall && !isConduit) || hasLooseSuffix
+
+		// Skip if it's an installable item (already rendered in previous pass)
+		isInstallable := strings.HasPrefix(itemName, "Itm") && !isFloor && !isWall && !isConduit && !hasLooseSuffix
+		if isInstallable {
+			continue
+		}
+
+		if !isLoose || !r.showLoose {
+			continue
+		}
+
+		r.renderTile(item, itemName, items, coMap, clippedScreen, x, y, centerX, centerY, mx, my, false)
 	}
 
 	// Draw cursor preview
@@ -505,6 +593,28 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 		rotation = fRotation
 	}
 
+	// Get item size from CO definition (for multi-tile items)
+	sizeX := 1.0
+	sizeY := 1.0
+	tileID := utils.GetStringValue(item, "strID")
+	if co, exists := coMap[tileID]; exists {
+		if fSizeX, ok := co["fSizeX"].(float64); ok && fSizeX > 0 {
+			sizeX = fSizeX
+		}
+		if fSizeY, ok := co["fSizeY"].(float64); ok && fSizeY > 0 {
+			sizeY = fSizeY
+		}
+		// Debug: log size for non-1x1 items
+		if (sizeX != 1.0 || sizeY != 1.0) && config.Verbose {
+			log.Printf("Rendering multi-tile item %s with size %.1fx%.1f", itemName, sizeX, sizeY)
+		}
+	} else if config.Verbose {
+		// Check if this item should have a CO but doesn't
+		if !strings.HasPrefix(itemName, "ItmFloor") && !strings.HasPrefix(itemName, "ItmWall") && !strings.HasPrefix(itemName, "ItmConduit") {
+			log.Printf("Warning: Item %s (ID: %s) has no CO definition in coMap", itemName, tileID)
+		}
+	}
+
 	// Calculate draw position (flip Y-axis)
 	drawX := float32(int(x + r.offsetX + (float32(tileX)+centerX)*tileSize*r.scale))
 	drawY := float32(int(y + r.offsetY + (-float32(tileY)-centerY)*tileSize*r.scale))
@@ -513,9 +623,61 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 	// Get the tile image path
 	imagePath := getTileImagePath(item, coMap, itemName)
 
-	// Check if mouse is hovering over this tile
-	isHovered := float32(mx) >= drawX && float32(mx) < drawX+drawSize &&
-		float32(my) >= drawY && float32(my) < drawY+drawSize
+	// Load the image first to determine size
+	tileImg := r.loadTileImage(imagePath)
+
+	// For walls and conduits, extract the correct sprite from the sprite sheet
+	var spriteToRender *ebiten.Image
+	isConduit := len(itemName) >= 10 && itemName[:10] == "ItmConduit"
+	isFloor := len(itemName) >= 8 && itemName[:8] == "ItmFloor"
+	isInstallable := !isFloor && !isWall && !isConduit && strings.HasPrefix(itemName, "Itm") && !strings.HasSuffix(itemName, "Loose")
+	isLoose := strings.HasSuffix(itemName, "Loose")
+
+	if tileImg != nil {
+		// Check if this is a sprite sheet (contains "Sheet" in filename case-insensitive)
+		lowerPath := strings.ToLower(imagePath)
+		isSpriteSheet := strings.Contains(lowerPath, "sheet")
+
+		if config.Verbose && isSpriteSheet {
+			log.Printf("Sprite sheet detected: %s for item %s", imagePath, itemName)
+		}
+
+		if isWall || isConduit || isSpriteSheet {
+			// TODO: Fix neighbor detection - for now just use index 13
+			spriteToRender = utils.ExtractSpriteFromSheet(tileImg, 13)
+		} else {
+			// Floors and non-sheet items use the full image
+			spriteToRender = tileImg
+		}
+	}
+
+	// Calculate draw size based on item type
+	var drawWidth, drawHeight float32
+	if (isInstallable || isLoose) && spriteToRender != nil {
+		// For installable/loose items, use natural image size at 0.5x scale (then apply zoom)
+		drawWidth = float32(spriteToRender.Bounds().Dx()) * r.scale * 0.5
+		drawHeight = float32(spriteToRender.Bounds().Dy()) * r.scale * 0.5
+	} else {
+		// For floors, walls, conduits: use grid-based sizing
+		drawWidth = drawSize * float32(sizeX)
+		drawHeight = drawSize * float32(sizeY)
+	}
+
+	// Check if mouse is hovering over this tile (use actual width/height)
+	var actualDrawX, actualDrawY float32
+	if isInstallable || isLoose {
+		// For centered items, adjust hover box
+		tileCenterOffsetX := drawSize / 2
+		tileCenterOffsetY := drawSize / 2
+		actualDrawX = drawX + tileCenterOffsetX - drawWidth/2
+		actualDrawY = drawY + tileCenterOffsetY - drawHeight/2
+	} else {
+		actualDrawX = drawX
+		actualDrawY = drawY
+	}
+
+	isHovered := float32(mx) >= actualDrawX && float32(mx) < actualDrawX+drawWidth &&
+		float32(my) >= actualDrawY && float32(my) < actualDrawY+drawHeight
 	if isHovered {
 		r.hoveredTile = item
 		// Store the grid position for cursor tile placement
@@ -524,47 +686,56 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 		r.mouseInGrid = true
 	}
 
-	// Try to load and draw the tile image
-	tileImg := r.loadTileImage(imagePath)
-	if tileImg != nil {
-		// For walls, extract the correct sprite from the 4x4 sheet
-		var spriteToRender *ebiten.Image
-		if isWall {
-			// TODO: Fix neighbor detection - for now just use index 13
-			spriteToRender = utils.ExtractSpriteFromSheet(tileImg, 13)
-		} else {
-			// Floors use the full image
-			spriteToRender = tileImg
-		}
+	// Draw the tile image
+	if spriteToRender != nil {
+		// Draw the actual tile image with rotation
+		opts := &ebiten.DrawImageOptions{}
 
-		if spriteToRender != nil {
-			// Draw the actual tile image with rotation
-			opts := &ebiten.DrawImageOptions{}
-
-			// Scale
-			scaleX := drawSize / float32(spriteToRender.Bounds().Dx())
-			scaleY := drawSize / float32(spriteToRender.Bounds().Dy())
-			opts.GeoM.Scale(float64(scaleX), float64(scaleY))
-
-			opts.GeoM.Translate(-float64(drawSize)/2, -float64(drawSize)/2)
+		// Scale based on item type
+		if isInstallable || isLoose {
+			// Rotate around sprite center first (at original size)
+			imgW := float32(spriteToRender.Bounds().Dx())
+			imgH := float32(spriteToRender.Bounds().Dy())
+			opts.GeoM.Translate(-float64(imgW)/2, -float64(imgH)/2)
 			theta := (360 - rotation) * math.Pi / 180.0
 			opts.GeoM.Rotate(theta)
-			opts.GeoM.Translate(float64(drawSize)/2, float64(drawSize)/2)
+			opts.GeoM.Translate(float64(imgW)/2, float64(imgH)/2)
 
-			// Translate to position
-			opts.GeoM.Translate(float64(drawX), float64(drawY))
-			clippedScreen.DrawImage(spriteToRender, opts)
+			// Then apply 0.5x scale and zoom scale
+			opts.GeoM.Scale(float64(r.scale)*0.5, float64(r.scale)*0.5)
+		} else {
+			// Scale to fit grid tiles
+			scaleX := drawWidth / float32(spriteToRender.Bounds().Dx())
+			scaleY := drawHeight / float32(spriteToRender.Bounds().Dy())
+			opts.GeoM.Scale(float64(scaleX), float64(scaleY))
+
+			// Rotate around center
+			opts.GeoM.Translate(-float64(drawWidth)/2, -float64(drawHeight)/2)
+			theta := (360 - rotation) * math.Pi / 180.0
+			opts.GeoM.Rotate(theta)
+			opts.GeoM.Translate(float64(drawWidth)/2, float64(drawHeight)/2)
 		}
+
+		// Translate to position
+		if isInstallable || isLoose {
+			// Center the item on the grid tile center
+			tileCenterOffsetX := drawSize / 2
+			tileCenterOffsetY := drawSize / 2
+			opts.GeoM.Translate(float64(drawX+tileCenterOffsetX-drawWidth/2), float64(drawY+tileCenterOffsetY-drawHeight/2))
+		} else {
+			opts.GeoM.Translate(float64(drawX), float64(drawY))
+		}
+		clippedScreen.DrawImage(spriteToRender, opts)
 	} else {
-		// Fallback to colored rectangle if image not found
+		// Fallback to colored rectangle if image not found (use actual width/height)
 		tileColor := color.NRGBA{80, 120, 160, 255}
-		vector.DrawFilledRect(clippedScreen, drawX, drawY, drawSize, drawSize, tileColor, false)
+		vector.DrawFilledRect(clippedScreen, drawX, drawY, drawWidth, drawHeight, tileColor, false)
 		borderColor := color.NRGBA{50, 50, 60, 255}
-		vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 1, borderColor, false)
+		vector.StrokeRect(clippedScreen, drawX, drawY, drawWidth, drawHeight, 1, borderColor, false)
 	}
 
 	// Check if strCODef matches strName
-	tileID := ""
+	tileID = ""
 	if strID, ok := item["strID"].(string); ok {
 		tileID = strID
 	}
@@ -586,13 +757,53 @@ func (r *ShipRenderer) renderTile(item map[string]interface{}, itemName string, 
 	// Draw red transparent overlay if CO definition doesn't match tile name
 	if mismatchDetected {
 		redOverlay := color.NRGBA{255, 0, 0, 64}
-		vector.DrawFilledRect(clippedScreen, drawX, drawY, drawSize, drawSize, redOverlay, false)
+		vector.DrawFilledRect(clippedScreen, actualDrawX, actualDrawY, drawWidth, drawHeight, redOverlay, false)
 	}
 
 	// Highlight hovered tile
 	if isHovered {
 		highlightColor := color.NRGBA{255, 255, 0, 128}
-		vector.StrokeRect(clippedScreen, drawX, drawY, drawSize, drawSize, 2, highlightColor, false)
+
+		if (isInstallable || isLoose) && rotation != 0 {
+			// For rotated items, draw rotated rectangle
+			centerX := actualDrawX + drawWidth/2
+			centerY := actualDrawY + drawHeight/2
+			halfW := drawWidth / 2
+			halfH := drawHeight / 2
+
+			// Calculate rotation angle (negate to match item rotation)
+			theta := (360 - rotation) * math.Pi / 180.0
+			cosTheta := float32(math.Cos(theta))
+			sinTheta := float32(math.Sin(theta))
+
+			// Calculate the four corners rotated around center
+			corners := [4][2]float32{
+				{-halfW, -halfH}, // top-left
+				{halfW, -halfH},  // top-right
+				{halfW, halfH},   // bottom-right
+				{-halfW, halfH},  // bottom-left
+			}
+
+			// Rotate and translate each corner
+			for i := range corners {
+				x := corners[i][0]
+				y := corners[i][1]
+				corners[i][0] = x*cosTheta - y*sinTheta + centerX
+				corners[i][1] = x*sinTheta + y*cosTheta + centerY
+			}
+
+			// Draw lines between corners
+			for i := 0; i < 4; i++ {
+				next := (i + 1) % 4
+				vector.StrokeLine(clippedScreen,
+					corners[i][0], corners[i][1],
+					corners[next][0], corners[next][1],
+					2, highlightColor, false)
+			}
+		} else {
+			// For non-rotated items, use simple rectangle
+			vector.StrokeRect(clippedScreen, actualDrawX, actualDrawY, drawWidth, drawHeight, 2, highlightColor, false)
+		}
 	}
 }
 
@@ -609,13 +820,14 @@ func (r *ShipRenderer) renderCursorPreview(cursorTile map[string]interface{}, it
 	cursorImagePath := getTileImagePath(cursorTile, coMap, cursorName)
 	cursorImg := r.loadTileImage(cursorImagePath)
 	if cursorImg != nil {
-		// Check if cursor tile is a wall
+		// Check if cursor tile is a wall or conduit
 		isCursorWall := len(cursorName) >= 7 && cursorName[:7] == "ItmWall"
+		isCursorConduit := len(cursorName) >= 10 && cursorName[:10] == "ItmConduit"
 
-		// For walls, extract sprite based on what neighbors would be after placement
+		// For walls and conduits, extract sprite based on what neighbors would be after placement
 		var spriteToRender *ebiten.Image
-		if isCursorWall {
-			// Use index 13 for cursor preview (standard wall segment)
+		if isCursorWall || isCursorConduit {
+			// Use index 13 for cursor preview (standard segment)
 			spriteToRender = utils.ExtractSpriteFromSheet(cursorImg, 13)
 		} else {
 			spriteToRender = cursorImg
@@ -676,6 +888,18 @@ func (r *ShipRenderer) SetShowFloor(show bool) {
 
 func (r *ShipRenderer) SetShowWall(show bool) {
 	r.showWall = show
+}
+
+func (r *ShipRenderer) SetShowConduit(show bool) {
+	r.showConduit = show
+}
+
+func (r *ShipRenderer) SetShowInstallable(show bool) {
+	r.showInstallable = show
+}
+
+func (r *ShipRenderer) SetShowLoose(show bool) {
+	r.showLoose = show
 }
 
 func (r *ShipRenderer) GetHoveredTile() map[string]interface{} {
